@@ -1186,7 +1186,10 @@ async def apply_to_job(
             f"- If an element doesn't respond after 2-3 clicks, try a completely different method (keyboard, scrolling, different selector).\n"
             f"- Do NOT repeat the same failing action more than 3 times — switch strategies.\n"
             f"- If you've been stuck on the same form field for more than 5 steps, skip it or call done with success=false.\n"
-            f"- You have a maximum of 70 steps total. Budget your steps wisely.\n\n"
+            f"- You have a maximum of 70 steps total. Budget your steps wisely.\n"
+            f"- Work through visible fields top-to-bottom in one pass. Before acting on a field, check if it already has a "
+            f"value — if so, skip it and move to the next field below it. Never re-click or retype a field that already "
+            f"has a value, and never bounce back to an earlier field once you've moved past it.\n\n"
             f"TRACKING: Include in memory field after submission:\n"
             f'@@JOB_APPLIED: {{"title": "{title}", "company": "{company}", "location": "{job.get("location", "")}"}}\n'
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"
