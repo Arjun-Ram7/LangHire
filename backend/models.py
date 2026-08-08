@@ -11,7 +11,7 @@ class CollectRequest(BaseModel):
 
 
 class ApplyRequest(BaseModel):
-    mode: Literal["easy", "external", "all"] = "easy"
+    mode: Literal["easy", "external", "all", "review"] = "review"
     limit: Optional[int] = Field(default=None, ge=1, le=500)
     workers: int = Field(default=1, ge=1, le=4)
     job_url: Optional[str] = None

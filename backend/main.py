@@ -3,6 +3,7 @@ Python backend for LangHire desktop app.
 Runs as a local FastAPI server (sidecar process launched by Tauri).
 """
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -594,9 +595,12 @@ class _LogCapture(io.StringIO):
                     if len(self._log) > self._max:
                         del self._log[:len(self._log) - self._max // 2]
                     if self._status is not None and "💾" in line:
-                        m = _re.search(r"total this title:\s*(\d+)", line)
-                        if m:
-                            self._status["collected"] = int(m.group(1))
+                        if "Saved 1 new job" in line:
+                            self._status["collected"] = self._status.get("collected", 0) + 1
+                        else:
+                            m = _re.search(r"total this title:\s*(\d+)", line)
+                            if m:
+                                self._status["collected"] = max(self._status.get("collected", 0), int(m.group(1)))
                 if self._metrics and self._run_id:
                     try:
                         level = "ERROR" if "❌" in line else "WARNING" if "⚠️" in line else "INFO"
@@ -761,6 +765,22 @@ _collection_status: dict = {"running": False, "title": None, "log": []}
 _collection_thread: threading.Thread | None = None
 
 
+def _split_collection_titles(raw_title: Optional[str]) -> list[str]:
+    """Allow the collector title box to accept comma/newline separated searches."""
+    if not raw_title:
+        return []
+
+    titles: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[,;\n\r]+", raw_title):
+        title = " ".join(part.strip(" \t'\"").split())
+        key = title.casefold()
+        if title and key not in seen:
+            seen.add(key)
+            titles.append(title)
+    return titles
+
+
 @app.post("/jobs/collect")
 async def start_collection(body: CollectRequest):
     """Start job collection in-process (no subprocess, no external Python needed)."""
@@ -772,10 +792,18 @@ async def start_collection(body: CollectRequest):
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
 
-    title = body.title
+    requested_titles = _split_collection_titles(body.title)
     max_jobs = body.max_jobs
     filters = body.filters or {}
-    _collection_status = {"running": True, "title": title or "all titles", "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": max_jobs}
+    status_title = (
+        requested_titles[0]
+        if len(requested_titles) == 1
+        else f"{len(requested_titles)} pasted titles"
+        if requested_titles
+        else "all titles"
+    )
+    status_max_jobs = max_jobs * len(requested_titles) if max_jobs and requested_titles else max_jobs
+    _collection_status = {"running": True, "title": status_title, "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": status_max_jobs}
 
     async def _do_collect():
         """Run collection logic directly, bypassing argparse."""
@@ -795,53 +823,41 @@ async def start_collection(body: CollectRequest):
         jobs = read_jobs()
         LOGS_DIR.mkdir(exist_ok=True)
 
-        titles = [title] if title else profile.get("target_job_titles", [])
+        titles = requested_titles or profile.get("target_job_titles", [])
+        if max_jobs and titles and not requested_titles:
+            with _status_lock:
+                _collection_status["max_jobs"] = max_jobs * len(titles)
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
+        collected_urls_this_run: set[str] = set()
 
-        for i, t in enumerate(titles):
-            if _collection_status.get("cancel_requested"):
-                print("🛑 Stop requested — halting collection")
-                break
-            print(f"\n{'='*60}")
-            print(f"[{i+1}/{len(titles)}] Collecting: {t}")
-            print(f"{'='*60}")
-            try:
-                found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
-                jobs = read_jobs()
-                # Don't increment collected here — it's already updated by the stdout/log handler
-                # parsing "total this title: N" and "N jobs collected" from agent output
-                print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
-            except Exception as e:
-                print(f"  Error: {e}")
+        try:
+            for i, t in enumerate(titles):
+                if _collection_status.get("cancel_requested"):
+                    print("🛑 Stop requested — halting collection")
+                    break
+                print(f"\n{'='*60}")
+                print(f"[{i+1}/{len(titles)}] Collecting: {t}")
+                print(f"{'='*60}")
+                try:
+                    _kill_browser_processes()
+                    await asyncio.sleep(0.5)
+                    found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
+                    collected_urls_this_run.update(j.get("url") for j in found if j.get("url"))
+                    jobs = read_jobs()
+                    print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
+                except Exception as e:
+                    print(f"  Error: {e}")
+                finally:
+                    _kill_browser_processes()
+                    await asyncio.sleep(0.3)
 
-        # Phase 2: Fetch descriptions for collected jobs
-        if not _collection_status.get("cancel_requested"):
-            jobs = read_jobs()
-            needs_desc = [
-                (url, j) for url, j in jobs.items()
-                if j.get("status") == "pending" and not j.get("description")
-            ]
-            if needs_desc:
-                print(f"\n📋 Fetching descriptions for {len(needs_desc)} jobs...")
-                for i, (url, job) in enumerate(needs_desc):
-                    if _collection_status.get("cancel_requested"):
-                        print("🛑 Stop requested — halting description fetch")
-                        break
-                    job_title = job.get("title", "Unknown")
-                    company = job.get("company", "Unknown")
-                    print(f"  [{i+1}/{len(needs_desc)}] {job_title} at {company}...")
-                    try:
-                        desc = await collect_jobs.fetch_description_for_job(url, job)
-                        if desc:
-                            from core.shared_config import update_job as _upd
-                            _upd(url, description=desc)
-                            print(f"    ✅ Got description ({len(desc)} chars)")
-                        else:
-                            print(f"    ⚠️  No description extracted")
-                    except Exception as e:
-                        print(f"    ❌ Error: {e}")
-
-        cred_task.cancel()
+            if not _collection_status.get("cancel_requested") and collected_urls_this_run:
+                print("\n📋 Skipping separate description backfill; descriptions are captured during LinkedIn card collection.")
+                print("   This avoids opening extra browser tabs after the fast collection pass.")
+        finally:
+            cred_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cred_task
 
         # Summary
         jobs = read_jobs()
@@ -854,7 +870,7 @@ async def start_collection(body: CollectRequest):
         return _do_collect()
 
     _collection_thread = _run_async_in_thread(make_coro, _collection_status)
-    return {"success": True, "message": f"Collection started for {title or 'all titles'}"}
+    return {"success": True, "message": f"Collection started for {status_title}"}
 
 
 @app.post("/jobs/collect/stop")
@@ -894,7 +910,7 @@ async def start_applying(body: ApplyRequest):
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
 
-    workers = body.workers
+    workers = 1 if body.mode == "review" else body.workers
     mode = body.mode
     limit = body.limit
     target_job_url = body.job_url
@@ -907,8 +923,8 @@ async def start_applying(body: ApplyRequest):
     else:
         _apply_status = {"running": True, "mode": mode, "workers": workers, "log": [f"Starting {mode} apply with {workers} worker(s)..."]}
 
-    # mode="all" applies to all pending jobs regardless of easy_apply status
-    easy_apply_filter = None if mode == "all" else (mode != "external")
+    # Review/all modes process the collected queue regardless of apply type.
+    easy_apply_filter = None if mode in {"all", "review"} else (mode != "external")
 
     async def _do_apply():
         """Run apply logic directly, bypassing argparse."""
@@ -964,6 +980,27 @@ async def start_applying(body: ApplyRequest):
 
         if not pending:
             print("No pending jobs to apply to.")
+            return
+
+        if mode == "review":
+            from cli.manual_review_queue import run_review_queue
+
+            print(
+                "Starting efficient review queue: deterministic fill first, "
+                "bounded Gemini fallback, no final submission."
+            )
+            stats = await run_review_queue(
+                pending,
+                profile,
+                cancel_flag=_apply_status,
+                easy_apply=None,
+                passes=5,
+                llm_cleanup=True,
+                llm_steps=18,
+                llm_timeout=150.0,
+                allow_safe_submit=False,
+            )
+            print(f"\nReview queue results: {stats}")
             return
 
         applied_labels = [
@@ -1053,7 +1090,7 @@ async def get_jobs(
 @app.get("/jobs/stats")
 async def get_job_stats():
     jobs = _load_jobs()
-    stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0}
+    stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0, "manual_review": 0}
     for j in jobs.values():
         s = j.get("status", "pending")
         if s in stats:

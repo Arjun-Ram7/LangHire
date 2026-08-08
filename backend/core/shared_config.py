@@ -1,21 +1,23 @@
 """Shared config, utilities, and credential management."""
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
-import boto3
 from filelock import FileLock
 from browser_use.llm import ChatAWSBedrock
 
 try:
-    from core.config import get_data_dir
+    from core.config import get_data_dir, load_llm_settings
+    from core.llm_factory import create_llm
     from memory import MemoryStore
 except ImportError:
-    from backend.core.config import get_data_dir
+    from backend.core.config import get_data_dir, load_llm_settings
+    from backend.core.llm_factory import create_llm
     from backend.memory import MemoryStore
 
 _SOURCE_DIR = Path(__file__).resolve().parent.parent.parent  # project root (or temp dir if frozen)
@@ -35,6 +37,85 @@ RESUMES_DIR = BASE_DIR / "resumes"
 
 # Browser profile ALWAYS in OS data dir (must match backend/main.py login endpoint)
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
+
+
+def find_playwright_chromium() -> str | None:
+    """Return the newest usable Playwright Chromium executable, if installed.
+
+    Browser-use does not currently recognize Playwright's newer Apple-silicon
+    ``Google Chrome for Testing`` cache layout, so LangHire resolves it before
+    constructing a BrowserSession.
+    """
+    cache_dirs: list[Path] = []
+    if sys.platform == "darwin":
+        cache_dirs.append(Path.home() / "Library" / "Caches" / "ms-playwright")
+    elif sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        cache_dirs.append(Path(local_app) / "ms-playwright")
+    cache_dirs.append(Path.home() / ".cache" / "ms-playwright")
+
+    try:
+        import playwright
+
+        bundled = Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+        if bundled.exists():
+            cache_dirs.insert(0, bundled)
+    except (ImportError, AttributeError, TypeError):
+        pass
+
+    platform_patterns = {
+        "darwin": (
+            "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+            "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        "win32": ("chrome-win64/chrome.exe", "chrome-win/chrome.exe"),
+        "linux": ("chrome-linux64/chrome", "chrome-linux/chrome"),
+    }
+    patterns = platform_patterns.get(sys.platform, platform_patterns["linux"])
+    for cache_dir in cache_dirs:
+        if not cache_dir.exists():
+            continue
+        for chromium_dir in sorted(cache_dir.glob("chromium-*"), reverse=True):
+            for pattern in patterns:
+                executable = chromium_dir / pattern
+                if executable.is_file():
+                    return str(executable)
+    return None
+
+
+def browser_session_kwargs() -> dict:
+    """Shared local BrowserSession launch options."""
+    # browser-use normally suppresses window focus so unattended agents do not
+    # steal the desktop. LangHire intentionally hands one protected Workday
+    # click to the user, so its automation window must remain focusable.
+    try:
+        from browser_use.browser.profile import BrowserProfile
+
+        default_ignored_args = list(
+            BrowserProfile.model_fields["ignore_default_args"].default_factory()
+        )
+    except Exception:
+        default_ignored_args = ["--enable-automation", "--disable-extensions", "--hide-scrollbars"]
+    kwargs = {
+        "user_data_dir": str(BROWSER_PROFILE_DIR),
+        "headless": False,
+        "chromium_sandbox": sys.platform != "linux",
+        "ignore_default_args": [
+            *default_ignored_args,
+            "--disable-focus-on-load",
+            "--disable-window-activation",
+        ],
+        # The bundled anti-popup/cookie extensions add enough startup latency
+        # on macOS to exceed browser-use's fixed 30-second CDP timeout. They are
+        # not required for LangHire's DOM-based form filling.
+        "enable_default_extensions": False,
+    }
+    executable = find_playwright_chromium()
+    if executable:
+        kwargs["executable_path"] = executable
+    return kwargs
 
 AWS_PROFILE = "default"
 AWS_REGION = "us-west-2"
@@ -164,8 +245,15 @@ async def credential_refresh_loop(interval_minutes: int = 14):
         refresh_credentials()
 
 
-def get_llm() -> ChatAWSBedrock:
-    """Create a fresh LLM client with current credentials."""
+def get_llm():
+    """Create a fresh LLM client from the app's current LLM settings."""
+    settings = load_llm_settings()
+    provider = (settings.get("provider") or "").strip().lower()
+    if provider:
+        return create_llm(settings)
+
+    # Legacy fallback for older installs that never saved LLM settings.
+    import boto3
     session = boto3.Session(profile_name=AWS_PROFILE, region_name=AWS_REGION)
     return ChatAWSBedrock(model=MODEL_ID, session=session)
 
