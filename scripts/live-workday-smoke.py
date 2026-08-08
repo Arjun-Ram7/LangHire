@@ -13,7 +13,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -26,21 +25,18 @@ from backend.core.autofill_facts import (
 )
 from backend.core.config import load_profile
 from backend.core.shared_config import RESUME_PATH, browser_session_kwargs, validate_job_url
-from cli.apply_jobs import _page_url, _pause_for_workday_human_click, _wait_for_page_settle
-from cli.manual_review_queue import _summarize_review, _wait_for_visible_surface
-
-
-def _workday_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return (
-        host.endswith("myworkdayjobs.com")
-        or host.endswith("myworkdaysite.com")
-        or host.endswith("workday.com")
-    )
+from backend.core.workday_flow import (
+    _pause_for_workday_human_click,
+    _summarize_review,
+    _wait_for_page_settle,
+    _wait_for_visible_surface,
+    is_workday_url,
+)
+from cli.apply_jobs import _page_url
 
 
 async def run(url: str, passes: int, hold_seconds: int, cdp_url: str | None = None) -> None:
-    if not validate_job_url(url) or not _workday_url(url):
+    if not validate_job_url(url) or not is_workday_url(url):
         raise SystemExit("URL must be a public Workday or myworkdayjobs.com posting")
 
     profile = load_profile()
