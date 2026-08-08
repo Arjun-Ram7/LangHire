@@ -46,6 +46,7 @@ const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
   failed: XCircle,
   blocked: Ban,
   in_progress: Loader2,
+  manual_review: FileText,
 };
 
 const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
@@ -54,6 +55,7 @@ const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
   failed: { color: "text-destructive", bg: "bg-[#FFF0F0]" },
   blocked: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
   in_progress: { color: "text-primary", bg: "bg-[#FFF0F3]" },
+  manual_review: { color: "text-blue-700", bg: "bg-blue-50" },
 };
 
 interface PendingTabProps {
@@ -135,6 +137,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     failed: t("status.failed"),
     blocked: t("status.blocked"),
     in_progress: t("status.inProgress"),
+    manual_review: t("status.manualReview", { defaultValue: "Manual Review" }),
   };
 
   const fetchJobs = (isBackgroundRefresh = false) => {
@@ -237,7 +240,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       const res = await startApplying({
         job_url: pendingApplyUrl,
         workers: 1,
-        mode: "all",
+        mode: "review",
       });
       if (!res.success) {
         alert(res.message);
@@ -342,7 +345,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       const res = await startApplying({
         job_urls: [...selectedJobs],
         workers: 1,
-        mode: "all",
+        mode: "review",
       });
       if (!res.success) {
         alert(res.message);
@@ -536,6 +539,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           { value: "pending", label: t("status.pending"), count: stats.pending },
           { value: "failed", label: t("status.failed"), count: stats.failed },
           { value: "blocked", label: t("status.blocked"), count: stats.blocked },
+          { value: "manual_review", label: t("status.manualReview", { defaultValue: "Manual Review" }), count: stats.manual_review },
         ].map(({ value, label, count }) => (
           <button
             key={value}
@@ -715,10 +719,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                               <Play className="w-3 h-3" />
                             )}
                             {applyingUrl === job.url
-                              ? t("jobItem.applying")
+                              ? "Preparing…"
                               : job.status === "failed"
-                              ? t("jobItem.retry")
-                              : t("jobItem.apply")}
+                              ? "Retry preparation"
+                              : "Prepare"}
                           </button>
                         </>
                       )}
@@ -893,7 +897,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             ) : (
               <Play className="w-4 h-4" />
             )}
-            Apply to {selectedJobs.size} job{selectedJobs.size > 1 ? "s" : ""}
+            Prepare {selectedJobs.size} application{selectedJobs.size > 1 ? "s" : ""}
           </button>
           <button
             onClick={handleBatchTailor}
@@ -921,7 +925,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
       <AutomationDialog
         open={showConfirmDialog}
-        title={t("dialog.startApplying")}
+        title="Prepare application for review"
+        reviewMode
         onConfirm={confirmApplySingle}
         onCancel={() => {
           setShowConfirmDialog(false);
