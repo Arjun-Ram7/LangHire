@@ -837,7 +837,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
       || classText.includes('select')
       || classText.includes('autocomplete')
       || el.getAttribute('list');
-    const dropdownFacts = ['city', 'state', 'country', 'current_location', 'preferred_us_locations', 'school', 'degree', 'major', 'heard_about'];
+    const dropdownFacts = ['city', 'state', 'country', 'current_location', 'preferred_us_locations', 'school', 'degree', 'major', 'heard_about', 'authorized_to_work_us', 'visa_sponsorship_needed'];
     if (field === 'preferred_us_locations' && !/^wherever\\b/i.test(value)) return true;
     if ((field === 'current_location' || field === 'preferred_us_locations') && hasAny(text, ['location'])) return true;
     return fieldLooksDropdown && dropdownFacts.includes(field)
@@ -1062,6 +1062,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (has(text, ['cpt'])) return ['cpt_status', facts.cpt_status || facts.cpt_eligible || 'Eligible for CPT'];
     if (has(text, ['opt'])) return ['opt_status', facts.opt_status || facts.opt_eligible || 'Eligible for OPT'];
     if (has(text, ['f 1', 'f1', 'f-1', 'visa type', 'visa status', 'immigration status', 'student status'])) return ['visa_status', facts.visa_status || facts.immigration_status || facts.current_work_status || 'F-1 student visa'];
+    if (has(text, ['legally authorized', 'authorized to work', 'eligible to work', 'work lawfully']) && !has(text, ['sponsor'])) return ['authorized_to_work_us', factBool('authorized_to_work_us') ? 'Yes' : 'No'];
+    if (has(text, ['require sponsorship', 'need sponsorship', 'needs sponsorship', 'visa sponsorship', 'sponsor you', 'sponsorship for employment', 'sponsorship to work'])) return ['visa_sponsorship_needed', (factBool('visa_sponsorship_needed') || factBool('future_sponsorship_needed') || factBool('h1b_sponsorship_needed')) ? 'Yes' : 'No'];
     if (has(text, ['work status', 'employment authorization'])) return ['current_work_status', facts.current_work_status || facts.work_authorization];
     if (has(text, ['work authorization', 'authorization status'])) return ['work_authorization', facts.work_authorization];
     if (has(text, ['first name', 'firstname', 'given name', 'givenname'])) return ['first_name', facts.first_name];
@@ -1374,7 +1376,9 @@ def _autofill_script(facts: dict[str, str]) -> str:
     let text = labelText(select);
     text = preferPrimaryFieldText(select, text);
     let field = null, value = null;
-    if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['month', 'mm'])) [field, value] = ['date_of_birth_month', optionValueFor(select, 'date_of_birth_month', facts.date_of_birth_month)];
+    if (has(text, ['require sponsorship', 'need sponsorship', 'needs sponsorship', 'visa sponsorship', 'sponsor you', 'sponsorship for employment', 'sponsorship to work'])) [field, value] = ['visa_sponsorship_needed', yesNoValue(select, factBool('visa_sponsorship_needed') || factBool('future_sponsorship_needed') || factBool('h1b_sponsorship_needed'))];
+    else if (has(text, ['legally authorized', 'authorized to work', 'eligible to work', 'work lawfully', 'work in the united states']) && !has(text, ['sponsor'])) [field, value] = ['authorized_to_work_us', yesNoValue(select, factBool('authorized_to_work_us'))];
+    else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['month', 'mm'])) [field, value] = ['date_of_birth_month', optionValueFor(select, 'date_of_birth_month', facts.date_of_birth_month)];
     else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['day', 'dd'])) [field, value] = ['date_of_birth_day', optionValueFor(select, 'date_of_birth_day', facts.date_of_birth_day)];
     else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['year', 'yyyy'])) [field, value] = ['date_of_birth_year', optionValueFor(select, 'date_of_birth_year', facts.date_of_birth_year)];
     else if (has(text, ['visa type', 'visa status', 'immigration status', 'student status', 'f 1', 'f1', 'f-1'])) [field, value] = ['visa_status', optionValueFor(select, 'visa_status', facts.visa_status || facts.f1_status || facts.f1_visa_status || facts.current_work_status)];

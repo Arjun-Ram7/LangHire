@@ -39,6 +39,38 @@ RESUMES_DIR = BASE_DIR / "resumes"
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
 
 
+def find_brave_browser() -> str | None:
+    """Return the installed Brave Browser executable, if present.
+
+    Automation still uses LangHire's own isolated BROWSER_PROFILE_DIR, not the
+    user's real Brave profile — this only swaps which Chromium binary renders
+    the window so it looks/feels like the user's actual browser.
+    """
+    candidates: list[Path]
+    if sys.platform == "darwin":
+        candidates = [Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")]
+    elif sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        candidates = [
+            Path(local_app) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+            Path(program_files) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+            Path(program_files_x86) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+        ]
+    else:
+        candidates = [
+            Path("/usr/bin/brave-browser"),
+            Path("/usr/bin/brave-browser-stable"),
+            Path("/opt/brave.com/brave/brave"),
+            Path("/snap/bin/brave"),
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_playwright_chromium() -> str | None:
     """Return the newest usable Playwright Chromium executable, if installed.
 
@@ -112,7 +144,15 @@ def browser_session_kwargs() -> dict:
         # not required for LangHire's DOM-based form filling.
         "enable_default_extensions": False,
     }
-    executable = find_playwright_chromium()
+    executable = find_brave_browser()
+    if executable:
+        # Brave's startup overhead (Shields, Wallet, Rewards init) exceeds
+        # browser-use's fixed 30s launch timeouts; both are overridable via
+        # env var (browser_use/browser/events.py: _get_timeout).
+        os.environ.setdefault("TIMEOUT_BrowserStartEvent", "90")
+        os.environ.setdefault("TIMEOUT_BrowserLaunchEvent", "90")
+    else:
+        executable = find_playwright_chromium()
     if executable:
         kwargs["executable_path"] = executable
     return kwargs

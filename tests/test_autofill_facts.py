@@ -136,6 +136,24 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(values["disability"], "No, I do not have a disability")
         self.assertEqual(result["requiredEmpty"], 0)
 
+    def test_lever_style_authorization_and_sponsorship_are_not_shadowed_by_country_select(self):
+        # Lever's standard phrasing embeds the word "country" inside the
+        # authorization question, and "visa status" inside the sponsorship
+        # question. Both previously matched an earlier, unrelated <select>
+        # branch (country / visa_status) and were left blank.
+        result, values = self.run_fixture(
+            """
+            <div class="field"><label for="auth">Are you legally authorized to work in the country for which you are applying?</label>
+              <select id="auth" required><option value="">Select</option><option>Yes</option><option>No</option></select></div>
+            <div class="field"><label for="sponsor">Will you now or in the future require sponsorship for employment visa status (e.g., H-1B, etc.)?</label>
+              <select id="sponsor" required><option value="">Select</option><option>Yes</option><option>No</option></select></div>
+            """
+        )
+
+        self.assertEqual(values["auth"], "Yes", result)
+        self.assertEqual(values["sponsor"], "Yes", result)
+        self.assertEqual(result["requiredEmpty"], 0)
+
     def test_fuzzy_match_is_guarded_by_input_type(self):
         result, values = self.run_fixture(
             '<div class="field"><label for="wrong">Email Adress</label><input id="wrong" type="date" required></div>'
