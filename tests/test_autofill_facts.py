@@ -231,6 +231,36 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_school_combobox_falls_back_to_first_suggestion_on_name_mismatch(self):
+        # Typed "Virginia Tech" but the ATS's own suggestion list spells out
+        # the official name. No exact/loose text match should exist, but a
+        # visible suggestion means the search was recognized — take the
+        # first option rather than leaving the field for the LLM.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="school">School</label>
+                  <input id="school" role="combobox" aria-haspopup="listbox" required>
+                  <div id="options" role="listbox"></div></div>
+                <script>
+                  const input = document.getElementById('school');
+                  input.addEventListener('input', () => {
+                    const opt = document.createElement('div');
+                    opt.setAttribute('role', 'option');
+                    opt.textContent = 'Virginia Polytechnic Institute and State University';
+                    opt.addEventListener('click', () => { window.selectedSchool = opt.textContent; });
+                    document.getElementById('options').replaceChildren(opt);
+                  });
+                </script>
+                """
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "school": "Virginia Tech"}))
+            self.assertEqual(page.evaluate("window.selectedSchool"), "Virginia Polytechnic Institute and State University")
+            self.assertGreaterEqual(result["selects"], 1)
+        finally:
+            page.close()
+
     def test_workday_phone_state_and_previous_worker_controls(self):
         page = self.browser.new_page()
         try:

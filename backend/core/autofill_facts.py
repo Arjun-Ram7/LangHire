@@ -982,6 +982,18 @@ def _autofill_script(facts: dict[str, str]) -> str:
         return true;
       }}
     }}
+    // Exact/loose text matching is brittle for city and school names (format
+    // and spelling variants abound). For these fields, a visible suggestion
+    // list means the typed text was recognized — the first option is a
+    // reasonable pick rather than leaving the field blank for the LLM.
+    if (['current_location', 'preferred_us_locations', 'school'].includes(field) && options.length) {{
+      const first = options[0];
+      if (clickLikeHuman(first.el)) {{
+        el.dataset.staticAutocompleteSelected = field;
+        result.selects += 1;
+        return true;
+      }}
+    }}
     dispatchKey(el, 'Enter');
     return false;
   }}
