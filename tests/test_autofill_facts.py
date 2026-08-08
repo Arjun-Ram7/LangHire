@@ -261,6 +261,37 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_locked_plain_text_field_becomes_read_only(self):
+        # Read-only stops the LLM agent from wasting steps re-typing a value
+        # static autofill already filled correctly.
+        page = self.browser.new_page()
+        try:
+            page.set_content('<label for="first">First Name</label><input id="first">')
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertEqual(page.locator("#first").input_value(), "Arjun")
+            self.assertTrue(page.locator("#first").evaluate("el => el.readOnly"))
+        finally:
+            page.close()
+
+    def test_locked_combobox_field_stays_editable_for_a_second_search_pass(self):
+        # Combobox-style widgets are excluded from the read-only lock because
+        # some (e.g. Workday's "How did you hear about us") need a second
+        # setNativeValue()+search pass on the same input to resolve a nested
+        # suggestion list — see test_workday_source_search_selects_linkedin.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                '<label for="loc">Current Location</label>'
+                '<input id="loc" role="combobox" aria-haspopup="listbox">'
+            )
+            result = page.evaluate(
+                _autofill_script({**WORKDAY_FACTS, "current_location": "Blacksburg, Virginia"})
+            )
+            self.assertEqual(page.locator("#loc").input_value(), "Blacksburg, Virginia", result)
+            self.assertFalse(page.locator("#loc").evaluate("el => el.readOnly"))
+        finally:
+            page.close()
+
     def test_workday_phone_state_and_previous_worker_controls(self):
         page = self.browser.new_page()
         try:

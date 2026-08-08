@@ -731,10 +731,29 @@ def _autofill_script(facts: dict[str, str]) -> str:
     el.dataset.staticReactSynced = 'true';
   }}
 
+  function looksLikeComboboxWidget(el) {{
+    const role = norm(el.getAttribute?.('role'));
+    const cls = norm(el.className || '');
+    return role.includes('combobox')
+      || !!el.getAttribute?.('aria-autocomplete')
+      || !!el.getAttribute?.('aria-controls')
+      || cls.includes('select')
+      || cls.includes('autocomplete')
+      || !!el.getAttribute?.('list');
+  }}
+
   function lock(el, value, field) {{
     const sig = signature(el);
     window.__STATIC_AUTOFILL_LOCKS[sig] = {{ value, field }};
     el.dataset.staticAutofilled = field;
+    // Locked plain text fields are correct; making them read-only stops the
+    // LLM agent from wasting steps re-typing a value that is already right.
+    // Combobox-style widgets are excluded: some (e.g. Workday's "How did you
+    // hear about us") need a second setNativeValue()+search pass on the same
+    // input to resolve a nested suggestion list, which read-only would block.
+    if (!looksLikeComboboxWidget(el)) {{
+      try {{ if ('readOnly' in el) el.readOnly = true; }} catch (_) {{}}
+    }}
     result.locked += 1;
   }}
 
