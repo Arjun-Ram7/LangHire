@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Tasks 1-4 implemented and committed (branch `worktree-workday-deterministic-routing`, commit `7b2eeca`). All 32 unit tests pass (`python -m unittest discover -s tests -v`). Task 5 (manual live-Workday smoke test) is **not** run automatically — it requires a real, currently-open Workday posting URL and the user's own browser profile/credentials, and it's the kind of live third-party-site interaction this session won't kick off unprompted. Run it yourself with the command in Task 5 Step 1 when ready.
+
 **Goal:** Route Workday application pages through the existing deterministic (no-LLM) autofill/click engine instead of the vision-based `browser_use.Agent`, with a bounded per-question LLM fallback, and never auto-click final Submit.
 
 **Architecture:** Extract the engine currently trapped inside `cli/manual_review_queue.py` into a new shared module `backend/core/workday_flow.py` (breaks a circular-import blocker), add `is_workday_url` + `run_workday_deterministic` to it, then call that from `cli/apply_jobs.py:apply_to_job` when the current page is a Workday host, falling back to the existing vision agent only if the deterministic engine fails before making any progress.
