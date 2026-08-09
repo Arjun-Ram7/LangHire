@@ -117,6 +117,39 @@ def create_llm(settings: dict):
         raise ValueError(f"Unknown LLM provider: {provider}")
 
 
+def create_fallback_llm(settings: dict):
+    """Create a secondary model for Agent(fallback_llm=...) to switch to when
+    the primary model's output fails validation (e.g. malformed JSON — seen
+    live from gemini-2.5-flash-lite mid-run). Without this, browser_use just
+    logs "no fallback_llm configured" and retries the same failing model.
+
+    Only wired for openrouter, reusing the same API key with a different,
+    more reliable model (gpt-4o-mini — already validated this session as a
+    solid, vision-capable fallback). Other providers return None rather than
+    guessing a mismatched credential/model pairing.
+    """
+    provider = settings.get("provider", "openai")
+    if provider != "openrouter":
+        return None
+    try:
+        from browser_use.llm import ChatOpenAI
+        cfg = settings.get("openrouter", {})
+        api_key = cfg.get("api_key", "").strip()
+        if not api_key:
+            return None
+        fallback_model = cfg.get("model", "")
+        # Don't "fall back" to the same model that just failed.
+        if fallback_model == "openai/gpt-4o-mini":
+            return None
+        return ChatOpenAI(
+            model="openai/gpt-4o-mini",
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+    except Exception:
+        return None
+
+
 async def test_connection(llm) -> str:
     """Send a test message and return the response."""
     import asyncio

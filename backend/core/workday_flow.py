@@ -20,6 +20,7 @@ try:
     import core.shared_config as config
     from core.shared_config import LOGS_DIR
     from core.autofill_facts import (
+        _submit_guard_script,
         format_facts_for_prompt,
         probe_workday_human_checkpoint,
         run_static_autofill,
@@ -31,6 +32,7 @@ except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
     from backend.core.autofill_facts import (
+        _submit_guard_script,
         format_facts_for_prompt,
         probe_workday_human_checkpoint,
         run_static_autofill,
@@ -736,6 +738,18 @@ async def _run_llm_cleanup(
         if review.get("credentialError"):
             state["stop_reason"] = "credential error visible"
             return
+        # verificationCodeRequired above only catches OTP/PIN text inputs — a
+        # CAPTCHA (recaptcha/hcaptcha) is an interactive challenge widget, not
+        # a text field, so it was never caught until the pre-submit risk scan
+        # ran (too late — cleanup would burn its whole step budget trying to
+        # click through something it can't solve). Check every step instead.
+        try:
+            risk = await _submission_risk_scan(browser)
+            if "human_verification" in (risk.get("flags") or []):
+                state["stop_reason"] = "CAPTCHA/human verification challenge present; leaving tab open for manual review"
+                return
+        except Exception:
+            pass
 
         issue_sig = json.dumps(
             {
@@ -814,10 +828,37 @@ async def _run_llm_cleanup(
 
     print(f"  🤖 [W{worker_id}] Gemini cleanup: up to {max_steps} steps / {int(timeout)}s")
     try:
+        # Install the submit-click guard as a page-lifecycle init script so it
+        # is live from the first paint of every future navigation, not just
+        # reactively between agent steps. This is what actually closes the
+        # Pariveda race (a same-step navigate-then-click could fire before
+        # on_step ever got a chance to reinstall the guard on the new page) —
+        # max_actions_per_step no longer needs to carry that burden.
+        try:
+            await browser._cdp_add_init_script(_submit_guard_script())
+        except Exception as exc:
+            print(f"  ⚠️  [W{worker_id}] Could not install proactive submit guard: {type(exc).__name__}: {exc}")
         llm = config.get_llm()
+        # gemini-2.5-flash-lite has been observed returning malformed JSON
+        # mid-run (a Pydantic validation error on AgentOutput), which
+        # browser_use otherwise just retries against the same failing model.
+        # A fallback model lets it recover instead of burning retries/steps.
+        fallback_llm = None
+        try:
+            from core.config import load_llm_settings
+            from core.llm_factory import create_fallback_llm
+            fallback_llm = create_fallback_llm(load_llm_settings())
+        except Exception:
+            try:
+                from backend.core.config import load_llm_settings
+                from backend.core.llm_factory import create_fallback_llm
+                fallback_llm = create_fallback_llm(load_llm_settings())
+            except Exception as exc:
+                print(f"  ⚠️  [W{worker_id}] Could not build fallback LLM: {type(exc).__name__}: {exc}")
         agent = Agent(
             task=task,
             llm=llm,
+            fallback_llm=fallback_llm,
             use_vision=True,
             browser_session=browser,
             sensitive_data=sensitive_data,
@@ -835,6 +876,16 @@ async def _run_llm_cleanup(
             loop_detection_window=4,
             step_timeout=45,
             llm_timeout=75,
+            # Back to 3: the proactive init-script guard above (not step
+            # boundaries) is what protects against the Submit-button race now.
+            # At 1 action/step every click got its own fresh screenshot+reasoning
+            # cycle, which gave the model repeated chances to "re-check" fields
+            # it had already answered correctly — that oscillation is what
+            # burned the whole step budget on Nuclear's demographics section
+            # and left real required fields (country, sponsorship, etc.) never
+            # reached. The resolved-field lock in autofill_facts.py (pointer-
+            # events:none once a combobox/choice is confirmed) is the actual
+            # fix for that: there's nothing left to click, regardless of batch size.
             max_actions_per_step=3,
             enable_planning=False,
             use_thinking=False,
@@ -853,6 +904,19 @@ async def _run_llm_cleanup(
             state["errors"] = [str(e) for e in (result.errors() or []) if e][:5]
         except Exception:
             state["errors"] = []
+        # A clean done(success=false) from the agent doesn't go through on_step's
+        # stop_reason branches (those are for hard triggers like a checkpoint
+        # timeout or loop detection) — without this, its own accurate reason for
+        # giving up is discarded and callers fall back to a generic/misleading
+        # message (e.g. blaming "Apply button never clicked" when the agent had
+        # in fact clicked Apply and then hit a genuinely blank/broken page).
+        if not state.get("stop_reason") and not state["success"]:
+            try:
+                final_text = result.final_result()
+                if final_text:
+                    state["stop_reason"] = str(final_text)[:400]
+            except Exception:
+                pass
         # browser-use also has its own loop detector. Normalize that result into
         # the same deterministic queue transition used by our page-state guard.
         if not state.get("stop_reason") and _looks_like_loop_stop(*state["errors"]):
@@ -892,6 +956,27 @@ class WorkdayDeterministicUnavailable(Exception):
     Callers should fall back to the vision agent when they see this; any
     later failure is folded into the returned manual_review result instead.
     """
+
+
+def scale_cleanup_budget(summary: dict, base_steps: int, base_timeout: float) -> tuple[int, float]:
+    """Scale the LLM cleanup budget to how much work is actually left.
+
+    A flat 35-step/300s budget regardless of form size is why Nuclear's
+    genuinely-required fields (country, sponsorship, authorization) never
+    got reached — the model spent its fixed budget on the fields it hit
+    first and ran out before the rest. A page with many unresolved custom
+    questions gets proportionally more room; a near-complete page keeps the
+    default (never less — a short form finishing early is not a problem).
+    """
+    remaining = int(summary.get("required_empty") or 0) + len(summary.get("needs_llm") or [])
+    if remaining <= 8:
+        return base_steps, base_timeout
+    # +2 steps and +15s per field beyond the baseline of 8, capped at 2x so a
+    # single pathological page can't consume the whole worker indefinitely.
+    extra_fields = remaining - 8
+    scaled_steps = min(base_steps * 2, base_steps + extra_fields * 2)
+    scaled_timeout = min(base_timeout * 2, base_timeout + extra_fields * 15.0)
+    return scaled_steps, scaled_timeout
 
 
 def _workday_blockers(summary: dict) -> list[str]:
@@ -939,6 +1024,7 @@ async def run_workday_deterministic(
         needs_cleanup = _needs_llm_cleanup(summary_before_cleanup)
         can_cleanup = _can_run_llm_cleanup(summary_before_cleanup, preflight={})
         if llm_cleanup and needs_cleanup and can_cleanup:
+            scaled_steps, scaled_timeout = scale_cleanup_budget(summary_before_cleanup, llm_steps, llm_timeout)
             cleanup = await _run_llm_cleanup(
                 browser,
                 facts=facts,
@@ -947,8 +1033,8 @@ async def run_workday_deterministic(
                 title=facts.get("job_title", ""),
                 company=facts.get("job_company", ""),
                 worker_id=worker_id,
-                max_steps=llm_steps,
-                timeout=llm_timeout,
+                max_steps=scaled_steps,
+                timeout=scaled_timeout,
             )
             if cleanup.get("last_review"):
                 review = cleanup["last_review"]
