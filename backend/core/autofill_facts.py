@@ -858,6 +858,12 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (!current || el.dataset.staticAutofilled || wasLocked || current !== value) {{
       setNativeValue(el, value);
       lock(el, value, field);
+      // Count what stuck, not what was attempted. React-controlled inputs
+      // discard a programmatic value and re-render their own, so writing is not
+      // evidence of filling. Comparing loosely rather than for equality keeps
+      // inputs that reformat what they accept (phone masks) counted.
+      const settled = clean(el.value);
+      if (!settled) return false;
       if (wasLocked && current) result.restored += 1;
       else result.filled += 1;
       return true;

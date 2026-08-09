@@ -171,6 +171,31 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_value_rejected_by_the_page_is_not_counted_as_filled(self):
+        # React-controlled inputs discard a programmatic value and re-render
+        # their own. Counting the write instead of the result is what produced
+        # reports like filled=17 on a form that still had 7 required blanks,
+        # and it is why autofill and manual review disagreed.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="first">First Name</label>
+                  <input id="first" required></div>
+                <script>
+                  const el = document.getElementById('first');
+                  el.addEventListener('input', () => { el.value = ''; });
+                </script>
+                """
+            )
+
+            result = page.evaluate(_autofill_script(WORKDAY_FACTS))
+
+            self.assertEqual(page.locator("#first").input_value(), "")
+            self.assertEqual(result["filled"], 0, result)
+        finally:
+            page.close()
+
     def test_only_the_first_unresolved_field_stays_interactive(self):
         # Order is enforced structurally, not by asking the model to behave:
         # every unresolved field below the topmost one is taken out of the
