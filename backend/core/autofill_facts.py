@@ -102,6 +102,7 @@ _FACT_ORDER = [
     "has_github",
     "portfolio_url",
     "veteran_status",
+    "sexual_orientation",
     "disability_status",
     "gender",
     "pronouns",
@@ -314,6 +315,7 @@ def _default_facts(profile: dict[str, Any], settings: dict[str, Any] | None = No
         "has_github": _profile_value(profile, "has_github"),
         "portfolio_url": _string(profile.get("portfolio_url") or profile.get("portfolio") or profile.get("website")),
         "veteran_status": _string(profile.get("veteran_status")) or "Prefer not to answer",
+        "sexual_orientation": _string(profile.get("sexual_orientation")) or "Prefer not to answer",
         "disability_status": _string(profile.get("disability_status")) or "Prefer not to answer",
         "gender": _string(profile.get("gender")) or "Prefer not to say",
         "pronouns": _string(profile.get("pronouns")) or ("He/Him/His" if "male" in _string(profile.get("gender")).lower() else ""),
@@ -1347,6 +1349,11 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (has(text, ['pronoun'])) return ['pronouns', facts.pronouns];
     if (has(text, ['gender identity', 'gender']) && !has(text, ['engender'])) return ['gender', facts.gender];
     if (has(text, ['race', 'ethnicity', 'racial'])) return ['race_ethnicity', facts.race_ethnicity];
+    // These three existed only on the <select> path, so the combobox form of
+    // the same EEO questions was never matched at all.
+    if (has(text, ['veteran'])) return ['veteran_status', facts.veteran_status];
+    if (has(text, ['disability', 'disabled'])) return ['disability_status', facts.disability_status];
+    if (has(text, ['sexual orientation', 'orientation'])) return ['sexual_orientation', facts.sexual_orientation];
     if (has(text, ['date of birth', 'birth date', 'dob'])) return ['date_of_birth', facts.date_of_birth];
     if (has(text, ['gpa', 'grade point'])) return ['gpa', facts.gpa];
     if (has(text, ['age']) && !has(text, ['page', 'stage', 'grade average'])) return ['age', facts.age];
@@ -1774,6 +1781,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     else if (has(text, ['relocate'])) [field, value] = ['willing_to_relocate', yesNoValue(select, factBool('willing_to_relocate'))];
     else if (has(text, ['veteran'])) [field, value] = ['veteran_status', optionValueFor(select, 'veteran_status', facts.veteran_status) || yesNoValue(select, false)];
     else if (has(text, ['disability'])) [field, value] = ['disability_status', optionValueFor(select, 'disability_status', facts.disability_status) || yesNoValue(select, false)];
+    else if (has(text, ['sexual orientation', 'orientation'])) [field, value] = ['sexual_orientation', optionValueFor(select, 'sexual_orientation', facts.sexual_orientation)];
     else if (has(text, ['pronoun'])) [field, value] = ['pronouns', optionValueFor(select, 'pronouns', facts.pronouns)];
     else if (has(text, ['gender', 'sex'])) [field, value] = ['gender', optionValueFor(select, 'gender', facts.gender)];
     else if (has(text, ['race', 'ethnicity'])) [field, value] = ['race_ethnicity', optionValueFor(select, 'race_ethnicity', facts.race_ethnicity) || optionValueFor(select, 'race_ethnicity', 'asian')];
