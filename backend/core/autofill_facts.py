@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,23 @@ def _major_from_degree(degree: str) -> str:
 def _extract_year(value: str) -> str:
     match = re.search(r"\b(19|20)\d{2}\b", value or "")
     return match.group(0) if match else ""
+
+
+def _age_from_dob(date_of_birth: str, today: date | None = None) -> int | str:
+    """Return the candidate's age in whole years, or "" if the date is unusable.
+
+    Age has to be derived rather than stored: a written-down number is correct
+    only until the next birthday, and applications ask for it directly.
+    """
+    parsed = _date_parts(date_of_birth)
+    if not (parsed.get("year") and parsed.get("month") and parsed.get("day")):
+        return ""
+    try:
+        born = date(int(parsed["year"]), int(parsed["month"]), int(parsed["day"]))
+    except ValueError:
+        return ""
+    now = today or date.today()
+    return now.year - born.year - ((now.month, now.day) < (born.month, born.day))
 
 
 def _date_parts(value: str) -> dict[str, str]:
@@ -399,6 +417,12 @@ def load_autofill_facts(profile: dict[str, Any], resume_path: str = "") -> dict[
     }.items():
         if dob_parts.get(part_key) and not merged.get(merged_key):
             merged[merged_key] = dob_parts[part_key]
+    # Age is derived last and overrides whatever was stored, because a written
+    # down age silently goes wrong on the candidate's next birthday.
+    derived_age = _age_from_dob(merged.get("date_of_birth_iso") or merged.get("date_of_birth") or "")
+    if derived_age != "":
+        merged["age"] = str(derived_age)
+        merged["age_over_18"] = "yes" if int(derived_age) >= 18 else "no"
     return {k: v for k, v in merged.items() if v}
 
 

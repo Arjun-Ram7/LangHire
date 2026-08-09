@@ -1,10 +1,13 @@
 import unittest
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 from playwright.sync_api import sync_playwright
 
 from backend.core.autofill_facts import (
+    _age_from_dob,
     _autofill_script,
+    load_autofill_facts,
     _default_facts,
     _workday_human_checkpoint_script,
     wait_for_workday_human_checkpoint,
@@ -1067,3 +1070,31 @@ class InteractiveBrowserHandoffTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FactDerivationTests(unittest.TestCase):
+    def test_age_is_derived_from_date_of_birth(self):
+        self.assertEqual(_age_from_dob("2006-10-28", date(2026, 8, 9)), 19)
+
+    def test_age_increments_on_the_birthday_itself(self):
+        self.assertEqual(_age_from_dob("2006-10-28", date(2026, 10, 28)), 20)
+
+    def test_age_is_blank_without_a_usable_date_of_birth(self):
+        self.assertEqual(_age_from_dob("", date(2026, 8, 9)), "")
+
+    def test_stored_age_is_replaced_by_the_derived_one(self):
+        # A written-down age is right only until the next birthday, so the
+        # stored value must never win over the value derived from the DOB.
+        with (
+            patch("backend.core.autofill_facts.load_settings", return_value={}),
+            patch("backend.core.autofill_facts.ensure_autofill_facts_file"),
+            patch(
+                "backend.core.autofill_facts._parse_facts_file",
+                return_value={"date_of_birth": "10/28/2006", "age": "11"},
+            ),
+            patch("backend.core.autofill_facts._age_from_dob", return_value=20),
+        ):
+            facts = load_autofill_facts({})
+
+        self.assertEqual(facts["age"], "20")
+        self.assertEqual(facts["age_over_18"], "yes")
