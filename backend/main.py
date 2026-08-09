@@ -994,10 +994,10 @@ async def start_applying(body: ApplyRequest):
                 profile,
                 cancel_flag=_apply_status,
                 easy_apply=None,
-                passes=5,
+                passes=8,
                 llm_cleanup=True,
-                llm_steps=18,
-                llm_timeout=150.0,
+                llm_steps=35,
+                llm_timeout=300.0,
                 allow_safe_submit=False,
             )
             print(f"\nReview queue results: {stats}")

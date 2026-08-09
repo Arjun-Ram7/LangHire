@@ -136,6 +136,24 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(values["disability"], "No, I do not have a disability")
         self.assertEqual(result["requiredEmpty"], 0)
 
+    def test_lever_style_authorization_and_sponsorship_are_not_shadowed_by_country_select(self):
+        # Lever's standard phrasing embeds the word "country" inside the
+        # authorization question, and "visa status" inside the sponsorship
+        # question. Both previously matched an earlier, unrelated <select>
+        # branch (country / visa_status) and were left blank.
+        result, values = self.run_fixture(
+            """
+            <div class="field"><label for="auth">Are you legally authorized to work in the country for which you are applying?</label>
+              <select id="auth" required><option value="">Select</option><option>Yes</option><option>No</option></select></div>
+            <div class="field"><label for="sponsor">Will you now or in the future require sponsorship for employment visa status (e.g., H-1B, etc.)?</label>
+              <select id="sponsor" required><option value="">Select</option><option>Yes</option><option>No</option></select></div>
+            """
+        )
+
+        self.assertEqual(values["auth"], "Yes", result)
+        self.assertEqual(values["sponsor"], "Yes", result)
+        self.assertEqual(result["requiredEmpty"], 0)
+
     def test_fuzzy_match_is_guarded_by_input_type(self):
         result, values = self.run_fixture(
             '<div class="field"><label for="wrong">Email Adress</label><input id="wrong" type="date" required></div>'
@@ -210,6 +228,314 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
             self.assertEqual(page.evaluate("window.selectedSource"), "LinkedIn Connection Post")
             self.assertGreaterEqual(result["selects"], 1)
             self.assertFalse(result["verificationCodeRequired"])
+        finally:
+            page.close()
+
+    def test_school_combobox_falls_back_to_first_suggestion_on_name_mismatch(self):
+        # Typed "Virginia Tech" but the ATS's own suggestion list spells out
+        # the official name. No exact/loose text match should exist, but a
+        # visible suggestion means the search was recognized — take the
+        # first option rather than leaving the field for the LLM.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="school">School</label>
+                  <input id="school" role="combobox" aria-haspopup="listbox" required>
+                  <div id="options" role="listbox"></div></div>
+                <script>
+                  const input = document.getElementById('school');
+                  input.addEventListener('input', () => {
+                    const opt = document.createElement('div');
+                    opt.setAttribute('role', 'option');
+                    opt.textContent = 'Virginia Polytechnic Institute and State University';
+                    opt.addEventListener('click', () => { window.selectedSchool = opt.textContent; });
+                    document.getElementById('options').replaceChildren(opt);
+                  });
+                </script>
+                """
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "school": "Virginia Tech"}))
+            self.assertEqual(page.evaluate("window.selectedSchool"), "Virginia Polytechnic Institute and State University")
+            self.assertGreaterEqual(result["selects"], 1)
+        finally:
+            page.close()
+
+    def test_locked_plain_text_field_becomes_read_only(self):
+        # Read-only stops the LLM agent from wasting steps re-typing a value
+        # static autofill already filled correctly.
+        page = self.browser.new_page()
+        try:
+            page.set_content('<label for="first">First Name</label><input id="first">')
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertEqual(page.locator("#first").input_value(), "Arjun")
+            self.assertTrue(page.locator("#first").evaluate("el => el.readOnly"))
+        finally:
+            page.close()
+
+    def test_locked_combobox_field_stays_editable_for_a_second_search_pass(self):
+        # Combobox-style widgets are excluded from the read-only lock because
+        # some (e.g. Workday's "How did you hear about us") need a second
+        # setNativeValue()+search pass on the same input to resolve a nested
+        # suggestion list — see test_workday_source_search_selects_linkedin.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                '<label for="loc">Current Location</label>'
+                '<input id="loc" role="combobox" aria-haspopup="listbox">'
+            )
+            result = page.evaluate(
+                _autofill_script({**WORKDAY_FACTS, "current_location": "Blacksburg, Virginia"})
+            )
+            self.assertEqual(page.locator("#loc").input_value(), "Blacksburg, Virginia", result)
+            self.assertFalse(page.locator("#loc").evaluate("el => el.readOnly"))
+        finally:
+            page.close()
+
+    def test_label_text_crosses_shadow_boundary_for_greenhouse_style_questions(self):
+        # Real bug found on a live Greenhouse application: each custom-question
+        # <input> is wrapped in its own open shadow root, while the actual
+        # visible question text ("How did you hear about this job?") lives
+        # outside it in the light DOM. closest()/previousElementSibling/
+        # parentElement all stop dead at a shadow boundary, so labelText()
+        # read almost nothing for these inputs and fuzzy-matched them onto
+        # unrelated fields — this exact field was locked in as `linkedin_url`
+        # on the live run, and a "restrictive covenants" question elsewhere
+        # on the same page was locked as `current_employer`.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field">
+                  <div>How did you hear about this job?</div>
+                  <div id="host"></div>
+                </div>
+                """
+            )
+            page.evaluate(
+                """() => {
+                    const host = document.getElementById('host');
+                    const root = host.attachShadow({ mode: 'open' });
+                    const input = document.createElement('input');
+                    input.id = 'question_18208291008';
+                    input.type = 'text';
+                    input.setAttribute('role', 'combobox');
+                    root.appendChild(input);
+                }"""
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "heard_about": "LinkedIn"}))
+            picked = next(
+                (item.get("picked") for item in result.get("debugInputs", []) if item.get("id") == "question_18208291008"),
+                None,
+            )
+            self.assertEqual(picked, "heard_about", result)
+        finally:
+            page.close()
+
+    def test_resolved_combobox_becomes_noninteractive_but_stays_in_form_submission(self):
+        # This is the fix for the real oscillation bug: an LLM cleanup agent
+        # kept re-clicking an already-correctly-answered veteran-status field
+        # on The Nuclear Company application because the field remained fully
+        # clickable after static autofill resolved it, and a weak vision
+        # model reading a page full of legal boilerplate never reliably
+        # noticed the data-staticAutocompleteSelected hint. Once resolved,
+        # the element must become unclickable (pointer-events/aria-disabled/
+        # tabindex) so it drops out of the agent's own interactive-element
+        # list — but never `disabled`, which would silently drop its value
+        # from the real form submission.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="race">How would you describe your racial/ethnic background?</label>
+                  <input id="race" name="race" role="combobox" aria-haspopup="listbox"></div>
+                <div id="options" role="listbox"></div>
+                <script>
+                  const input = document.getElementById('race');
+                  input.addEventListener('input', () => {
+                    const opt = document.createElement('div');
+                    opt.setAttribute('role', 'option');
+                    opt.textContent = 'Asian (Not Hispanic or Latino)';
+                    opt.addEventListener('click', () => { window.selectedRace = opt.textContent; });
+                    document.getElementById('options').replaceChildren(opt);
+                  });
+                </script>
+                """
+            )
+            page.evaluate(_autofill_script({**WORKDAY_FACTS, "race_ethnicity": "Asian Indian"}))
+            self.assertEqual(page.evaluate("window.selectedRace"), "Asian (Not Hispanic or Latino)")
+            el = page.locator("#race")
+            self.assertEqual(el.evaluate("e => e.style.pointerEvents"), "none")
+            self.assertEqual(el.evaluate("e => e.getAttribute('aria-disabled')"), "true")
+            self.assertEqual(el.evaluate("e => e.getAttribute('tabindex')"), "-1")
+            self.assertFalse(el.evaluate("e => e.disabled"), "must not be `disabled` — that drops it from form submission")
+
+            # A second pass (what on_step does every LLM step) must not
+            # attempt to re-click it — pointer-events:none makes any such
+            # click a no-op, so the recorded answer can't be clobbered.
+            page.evaluate("window.selectedRace = null")
+            page.evaluate(_autofill_script({**WORKDAY_FACTS, "race_ethnicity": "Asian Indian"}))
+            self.assertIsNone(page.evaluate("window.selectedRace"))
+        finally:
+            page.close()
+
+    def test_school_native_select_resolves_nickname_to_precise_official_name(self):
+        # Real live failure on a Palantir application: a 3300-option native
+        # <select> world-university list had no "Virginia Tech" entry (real
+        # entry: "Virginia Polytechnic Institute and State University"). With
+        # no alias, the LLM cleanup agent guessed and picked "Virginia
+        # Commonwealth University" instead — a different, unrelated school —
+        # which is worse than leaving the field blank. The alias map must
+        # resolve precisely and never accidentally match the wrong Virginia
+        # school, even though both names literally contain "Virginia".
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <label for="school">University</label>
+                <select id="school">
+                  <option value="">Select...</option>
+                  <option value="vcu">Virginia Commonwealth University</option>
+                  <option value="uva">University of Virginia</option>
+                  <option value="vt">Virginia Polytechnic Institute and State University</option>
+                  <option value="other">Other (School Not Listed)</option>
+                </select>
+                """
+            )
+            page.evaluate(_autofill_script({**WORKDAY_FACTS, "school": "Virginia Tech"}))
+            self.assertEqual(page.locator("#school").input_value(), "vt")
+        finally:
+            page.close()
+
+    def test_gender_combobox_matches_man_option_when_profile_says_male(self):
+        # Greenhouse-style EEO combobox where the visible option text is
+        # "Man" rather than the literal profile value "Male" — this used to
+        # fail with "Menu item with text or value 'Male' not found" during
+        # LLM cleanup because the static engine never even recognized this
+        # as a resolvable dropdown field.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="gender">How would you describe your gender identity?</label>
+                  <input id="gender" role="combobox" aria-haspopup="listbox"></div>
+                <div id="options" role="listbox"></div>
+                <script>
+                  const input = document.getElementById('gender');
+                  input.addEventListener('input', () => {
+                    const opts = ['Man', 'Woman', 'I prefer to self-describe', 'Decline to self identify'];
+                    document.getElementById('options').replaceChildren(
+                      ...opts.map(text => {
+                        const opt = document.createElement('div');
+                        opt.setAttribute('role', 'option');
+                        opt.textContent = text;
+                        opt.addEventListener('click', () => { window.selectedGender = text; });
+                        return opt;
+                      })
+                    );
+                  });
+                </script>
+                """
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "gender": "Male"}))
+            self.assertEqual(page.evaluate("window.selectedGender"), "Man", result)
+        finally:
+            page.close()
+
+    def test_race_ethnicity_combobox_matches_eeo_label_variant(self):
+        # Greenhouse/Lever EEO race question renders "Asian (Not Hispanic or
+        # Latino)" while the profile stores "Asian Indian" — the two must be
+        # recognized as the same category via alias matching, not left blank
+        # or (worse) resolved to an unrelated option.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="race">How would you describe your racial/ethnic background?</label>
+                  <input id="race" role="combobox" aria-haspopup="listbox"></div>
+                <div id="options" role="listbox"></div>
+                <script>
+                  const input = document.getElementById('race');
+                  input.addEventListener('input', () => {
+                    const opts = ['White (Not Hispanic or Latino)', 'Asian (Not Hispanic or Latino)', 'Black or African American (Not Hispanic or Latino)', 'Two or More Races'];
+                    document.getElementById('options').replaceChildren(
+                      ...opts.map(text => {
+                        const opt = document.createElement('div');
+                        opt.setAttribute('role', 'option');
+                        opt.textContent = text;
+                        opt.addEventListener('click', () => { window.selectedRace = text; });
+                        return opt;
+                      })
+                    );
+                  });
+                </script>
+                """
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "race_ethnicity": "Asian Indian"}))
+            self.assertEqual(page.evaluate("window.selectedRace"), "Asian (Not Hispanic or Latino)", result)
+        finally:
+            page.close()
+
+    def test_gender_combobox_leaves_blank_rather_than_substituting_wrong_value(self):
+        # If no option even loosely matches the profile's gender, the field
+        # must stay unresolved for manual/LLM review — never silently pick
+        # an unrelated option (e.g. "I prefer to self-describe" when the
+        # profile actually says "Male").
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="gender">Gender identity</label>
+                  <input id="gender" role="combobox" aria-haspopup="listbox"></div>
+                <div id="options" role="listbox"></div>
+                <script>
+                  const input = document.getElementById('gender');
+                  input.addEventListener('input', () => {
+                    const opt = document.createElement('div');
+                    opt.setAttribute('role', 'option');
+                    opt.textContent = 'Prefer to self-describe';
+                    opt.addEventListener('click', () => { window.selectedGender = opt.textContent; });
+                    document.getElementById('options').replaceChildren(opt);
+                  });
+                </script>
+                """
+            )
+            page.evaluate(_autofill_script({**WORKDAY_FACTS, "gender": "Male"}))
+            self.assertIsNone(page.evaluate("window.selectedGender"))
+        finally:
+            page.close()
+
+    def test_education_end_month_combobox_resolves_month_name_from_iso_date(self):
+        # Greenhouse renders education end date as two separate comboboxes
+        # (end-month--0 / end-year--0) rather than one text field. This is
+        # the exact field/id shape that got stuck looping during LLM cleanup
+        # on The Nuclear Company application.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="end-month--0">Month</label>
+                  <input id="end-month--0" role="combobox" aria-haspopup="listbox"></div>
+                <div id="options" role="listbox"></div>
+                <script>
+                  const input = document.getElementById('end-month--0');
+                  input.addEventListener('input', () => {
+                    const opts = ['September', 'October', 'November', 'December'];
+                    document.getElementById('options').replaceChildren(
+                      ...opts.map(text => {
+                        const opt = document.createElement('div');
+                        opt.setAttribute('role', 'option');
+                        opt.textContent = text;
+                        opt.addEventListener('click', () => { window.selectedMonth = text; });
+                        return opt;
+                      })
+                    );
+                  });
+                </script>
+                """
+            )
+            result = page.evaluate(_autofill_script({**WORKDAY_FACTS, "education_end_date": "2027-11"}))
+            self.assertEqual(page.evaluate("window.selectedMonth"), "November", result)
         finally:
             page.close()
 
