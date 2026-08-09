@@ -537,6 +537,16 @@ def _autofill_script(facts: dict[str, str]) -> str:
     return current || el;
   }}
 
+  const QUESTION_CONTAINER_SELECTOR = [
+    '.application-question',
+    '[class*="application-question"]',
+    '[class*="question"]',
+    '[class*="Question"]',
+    '[data-testid*="question"]',
+    'fieldset',
+    'li',
+  ].join(',');
+
   function labelText(el) {{
     const pieces = [
       el.getAttribute('aria-label'),
@@ -574,6 +584,17 @@ def _autofill_script(facts: dict[str, str]) -> str:
         const siblingText = clean(parentSibling.innerText || parentSibling.textContent || '');
         if (siblingText && siblingText.length <= 700) pieces.push(siblingText);
       }}
+    }}
+    // The lookup above lists a bare "div", and closest() returns the nearest
+    // match, so it stops at whatever wrapper immediately encloses the control.
+    // Lever/Ashby keep the question text one level further out (
+    // li.application-question > div.application-label + div.application-field),
+    // so look again for a question container specifically. Additive: whatever
+    // the generic lookup already found is still included.
+    const questionParent = host.closest(QUESTION_CONTAINER_SELECTOR);
+    if (questionParent && questionParent !== parent) {{
+      const questionText = clean(questionParent.innerText || questionParent.textContent || '');
+      if (questionText && questionText.length <= 900) pieces.push(questionText);
     }}
     return norm(pieces.filter(Boolean).join(' '));
   }}
@@ -615,6 +636,17 @@ def _autofill_script(facts: dict[str, str]) -> str:
         const siblingText = clean(parentSibling.innerText || parentSibling.textContent || '');
         if (siblingText && siblingText.length <= 700) pieces.push(siblingText);
       }}
+    }}
+    // The lookup above lists a bare "div", and closest() returns the nearest
+    // match, so it stops at whatever wrapper immediately encloses the control.
+    // Lever/Ashby keep the question text one level further out (
+    // li.application-question > div.application-label + div.application-field),
+    // so look again for a question container specifically. Additive: whatever
+    // the generic lookup already found is still included.
+    const questionParent = host.closest(QUESTION_CONTAINER_SELECTOR);
+    if (questionParent && questionParent !== parent) {{
+      const questionText = clean(questionParent.innerText || questionParent.textContent || '');
+      if (questionText && questionText.length <= 900) pieces.push(questionText);
     }}
     return clean(pieces.filter(Boolean).join(' '));
   }}

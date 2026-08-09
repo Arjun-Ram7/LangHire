@@ -171,6 +171,33 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_lever_card_question_text_reaches_the_matcher(self):
+        # Lever wraps each custom question as
+        #   li.application-question > div.application-label (question text)
+        #                           > div.application-field > div > <control>
+        # labelText's ancestor lookup listed a bare "div" alongside the specific
+        # question containers, and closest() returns the *nearest* match, so it
+        # always stopped at the innermost wrapper div. The question text sits
+        # above that, so the matcher only ever saw "cards[uuid][field1]" plus a
+        # CSS class and could not answer anything.
+        result, values = self.run_fixture(
+            """
+            <li class="application-question custom-question">
+              <div class="application-label"><div class="text">Expected graduation year</div></div>
+              <div class="application-field">
+                <div class="card-field-wrapper">
+                  <select id="cards-grad-year" name="cards[abc][field1]" class="card-field-input" required>
+                    <option value="">Select...</option>
+                    <option>2025</option><option>2026</option><option>2027</option><option>2028</option>
+                  </select>
+                </div>
+              </div>
+            </li>
+            """
+        )
+
+        self.assertEqual(values["cards-grad-year"], "2027", result["debugInputs"])
+
     def test_greenhouse_disability_question_is_not_matched_as_major(self):
         # Greenhouse's standard disability question contains the phrase
         # "one or more of your major life activities". The word "major" matched
