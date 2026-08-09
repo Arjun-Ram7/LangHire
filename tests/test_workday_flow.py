@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 from backend.core.workday_flow import (
     WorkdayDeterministicUnavailable,
     _cleanup_succeeded,
+    save_open_questions,
     is_workday_url,
     run_workday_deterministic,
 )
@@ -168,3 +169,46 @@ class CleanupSucceededTests(unittest.TestCase):
         review = {"requiredEmpty": 1, "needsLlm": [], "abandoned": 1}
 
         self.assertTrue(_cleanup_succeeded(True, review))
+
+
+class SaveOpenQuestionsTests(unittest.TestCase):
+    class FakeStore:
+        def __init__(self):
+            self.added = []
+
+        def qa_add(self, question, answer="", question_type="text", source_domain=""):
+            self.added.append((question, answer, question_type, source_domain))
+            return {"id": len(self.added)}
+
+    def test_open_questions_are_banked_with_type_and_domain(self):
+        # Review mode never wrote to the Q&A bank, so every question the
+        # candidate answered by hand was discarded and asked again next time.
+        store = self.FakeStore()
+        summary = {
+            "open_questions": [
+                {"question": "What is the hardest technical challenge you have faced?",
+                 "type": "textarea", "required": True},
+            ]
+        }
+
+        saved = save_open_questions(
+            summary, "https://jobs.lever.co/palantir/abc/apply", store=store
+        )
+
+        self.assertEqual(saved, 1)
+        question, answer, qtype, domain = store.added[0]
+        self.assertEqual(question, "What is the hardest technical challenge you have faced?")
+        self.assertEqual(answer, "")
+        self.assertEqual(qtype, "textarea")
+        self.assertEqual(domain, "jobs.lever.co")
+
+    def test_nothing_is_banked_when_there_are_no_open_questions(self):
+        store = self.FakeStore()
+
+        self.assertEqual(save_open_questions({"open_questions": []}, "https://x.com", store=store), 0)
+        self.assertEqual(store.added, [])
+
+    def test_a_missing_store_is_not_an_error(self):
+        summary = {"open_questions": [{"question": "Why this company?", "type": "textarea"}]}
+
+        self.assertEqual(save_open_questions(summary, "https://x.com", store=None), 0)

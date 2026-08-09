@@ -213,6 +213,7 @@ def _summarize_review(review: dict) -> dict:
         "needs_llm": (review.get("needsLlm") or [])[:8],
         "abandoned": int(review.get("abandoned") or 0),
         "abandoned_labels": (review.get("abandonedLabels") or [])[:8],
+        "open_questions": (review.get("openQuestions") or [])[:24],
         "required_empty_labels": (review.get("requiredEmptyLabels") or [])[:8],
         "visible_errors": (review.get("visibleErrors") or [])[:8],
         "matches": (review.get("matches") or [])[:24],
@@ -658,6 +659,42 @@ async def _static_fill_passes(
         # A short wait lets React/ATS widgets settle after upload/autocomplete.
         await asyncio.sleep(0.45)
     return review
+
+
+def save_open_questions(summary: dict, url: str, store=None) -> int:
+    """Bank the questions this job could not answer, so they are asked once.
+
+    Review mode never wrote to the Q&A repository, so every question the
+    candidate filled in by hand was discarded and asked again on the next job.
+    The store deduplicates, so re-banking a question already present only bumps
+    its times_seen counter.
+    """
+    questions = [q for q in (summary.get("open_questions") or []) if isinstance(q, dict)]
+    if not questions or store is None:
+        return 0
+
+    domain = ""
+    try:
+        domain = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        domain = ""
+
+    saved = 0
+    for item in questions:
+        text = str(item.get("question") or "").strip()
+        if not text:
+            continue
+        try:
+            store.qa_add(
+                question=text,
+                answer="",
+                question_type=str(item.get("type") or "text"),
+                source_domain=domain,
+            )
+            saved += 1
+        except Exception:
+            continue
+    return saved
 
 
 def _cleanup_succeeded(agent_reported_success: bool, last_review: dict | None) -> bool:

@@ -51,6 +51,7 @@ try:
         _static_fill_passes,
         _summarize_review,
         _wait_for_page_settle,
+        save_open_questions,
         scale_cleanup_budget,
     )
 except ImportError:
@@ -75,6 +76,7 @@ except ImportError:
         _static_fill_passes,
         _summarize_review,
         _wait_for_page_settle,
+        save_open_questions,
         scale_cleanup_budget,
     )
 
@@ -244,6 +246,14 @@ async def open_for_manual_review(
 
         current_url = await _page_url(browser)
         summary = _summarize_review(review)
+        # Bank whatever this job could not answer. The candidate answers each
+        # question once on the Q&A page and every later job reuses it.
+        try:
+            banked = save_open_questions(summary, current_url, store=config.get_memory_store())
+            if banked:
+                print(f"  📝 [W{worker_id}] Banked {banked} unanswered question(s) for review")
+        except Exception as exc:
+            print(f"  ⚠️  [W{worker_id}] Could not bank questions: {type(exc).__name__}")
         notes = preflight.get("notes") or []
         blocker_bits = []
         if summary["verification_code_required"]:
