@@ -259,6 +259,36 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
         self.assertEqual(values["addr"], "504 Hunt Club Rd", result["debugInputs"])
 
+    def test_open_questions_are_reported_as_readable_text(self):
+        # Questions banked for the user to answer must read like the question on
+        # the page. fieldSummary carries UUIDs, CSS class names, repeated label
+        # fragments and text bled in from neighbouring questions, which would
+        # make the bank unmatchable and unreadable.
+        result, _ = self.run_fixture(
+            """
+            <li class="application-question">
+              <div class="application-label">Disability status</div>
+              <div class="application-field"><input id="dis" required></div>
+            </li>
+            <li class="application-question">
+              <div class="application-label">What is the hardest technical challenge you have faced?</div>
+              <div class="application-field">
+                <textarea name="cards[504ca500-ddc8-45de-a4c4-95d4195434f9][field1]"
+                          class="card-field-input" placeholder="Type your response" required></textarea>
+              </div>
+            </li>
+            """
+        )
+
+        questions = [q["question"] for q in result["openQuestions"]]
+        self.assertIn(
+            "What is the hardest technical challenge you have faced?", questions, result["openQuestions"]
+        )
+        joined = " ".join(questions)
+        self.assertNotIn("504ca500", joined)
+        self.assertNotIn("card-field-input", joined)
+        self.assertNotIn("Disability status", questions[-1] if questions else "")
+
     def test_veteran_and_disability_comboboxes_are_answered(self):
         # Veteran and disability rules existed only on the <select> path, so the
         # combobox form of the same questions was never matched at all.
