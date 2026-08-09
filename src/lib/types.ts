@@ -266,7 +266,7 @@ export interface ApplyStatus {
   finished_at: string | null;
 }
 
-export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked";
+export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked" | "manual_review";
 
 export interface JobStats {
   total: number;
@@ -275,6 +275,7 @@ export interface JobStats {
   failed: number;
   blocked: number;
   in_progress: number;
+  manual_review: number;
 }
 
 export interface DashboardResponse {

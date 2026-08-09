@@ -20,11 +20,12 @@ export default function Jobs() {
     failed: 0,
     blocked: 0,
     in_progress: 0,
+    manual_review: 0,
   });
 
   const fetchStats = useCallback(() => {
     getJobStats()
-      .then((s) => setStats(s || { total: 0, pending: 0, applied: 0, failed: 0, blocked: 0, in_progress: 0 }))
+      .then((s) => setStats(s || { total: 0, pending: 0, applied: 0, failed: 0, blocked: 0, in_progress: 0, manual_review: 0 }))
       .catch(() => {});
   }, []);
 
@@ -38,7 +39,7 @@ export default function Jobs() {
 
   const tabs: { id: TabId; label: string; icon: typeof Search; count?: number }[] = [
     { id: "collect", label: "Collect", icon: Search, count: stats.total },
-    { id: "pending", label: "Review & Apply", icon: Play, count: stats.pending + stats.failed },
+    { id: "pending", label: "Review & Apply", icon: Play, count: stats.pending + stats.failed + stats.manual_review },
     { id: "history", label: "History", icon: CheckCircle, count: stats.applied },
   ];
 

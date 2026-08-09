@@ -30,6 +30,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [availableSources, setAvailableSources] = useState<PluginConfig[]>([]);
   const [collectLog, setCollectLog] = useState<string[]>([]);
   const [collected, setCollected] = useState(0);
+  const [statusMaxJobs, setStatusMaxJobs] = useState(0);
   const [collectFilters, setCollectFilters] = useState<Record<string, string>>({});
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
 
@@ -72,6 +73,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           setCollecting(true);
           setCollectLog(s.log || []);
           setCollected(s.collected || 0);
+          setStatusMaxJobs(s.max_jobs || 0);
         }
       })
       .catch(() => {});
@@ -93,6 +95,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           setCollecting(s.running);
           setCollectLog(s.log || []);
           setCollected(s.collected || 0);
+          setStatusMaxJobs(s.max_jobs || 0);
         })
         .catch(() => {});
     }, 2000);
@@ -126,6 +129,8 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       );
       if (res.success) {
         setCollecting(true);
+        setCollected(0);
+        setStatusMaxJobs(0);
         setCollectLog([t("collector.startingCollection")]);
         trackEvent("collection_started", {
           title: collectTitle || "all",
@@ -345,17 +350,17 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           )}
         </div>
         {/* Progress bar */}
-        {collecting && collectMaxJobs && (
+        {collecting && (statusMaxJobs || collectMaxJobs) && (
           <div className="mb-4">
             <ProgressBar
               percent={
-                collectMaxJobs > 0
-                  ? (collected / Number(collectMaxJobs)) * 100
+                (statusMaxJobs || Number(collectMaxJobs)) > 0
+                  ? Math.min(100, (collected / (statusMaxJobs || Number(collectMaxJobs))) * 100)
                   : 0
               }
               label={t("collector.collectedProgress", {
                 collected,
-                max: collectMaxJobs,
+                max: statusMaxJobs || collectMaxJobs,
               })}
             />
           </div>
