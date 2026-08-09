@@ -474,6 +474,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     url: location.href,
     needsLlm: [],
     abandonedLabels: [],
+    openQuestions: [],
     requiredEmptyLabels: [],
     visibleErrors: [],
     matches: [],
@@ -578,6 +579,47 @@ def _autofill_script(facts: dict[str, str]) -> str:
     'fieldset',
     'li',
   ].join(',');
+
+  // The question as a person would read it, for banking so the candidate can
+  // answer it once and have it reused. fieldSummary is unusable here: it is
+  // built for matching, so it carries UUIDs, CSS class names, repeated label
+  // fragments and text bled in from neighbouring questions.
+  function questionText(el) {{
+    const candidates = [];
+    const host = escapeShadowBoundary(el);
+    const container = host.closest(QUESTION_CONTAINER_SELECTOR);
+    if (container) {{
+      // The question sits in the container but outside the control's own
+      // wrapper, so remove the wrapper's text rather than the whole container's.
+      const own = clean(container.innerText || '');
+      const field = host.closest('[class*="field"], [class*="Field"], [class*="input"], [class*="Input"]');
+      const fieldText = field && field !== container ? clean(field.innerText || '') : '';
+      candidates.push(fieldText && own.startsWith(fieldText) === false ? own.replace(fieldText, ' ') : own);
+    }}
+    if (el.id) {{
+      const root = el.getRootNode?.() || document;
+      try {{
+        root.querySelectorAll(`label[for="${{CSS.escape(el.id)}}"]`).forEach((l) => candidates.push(clean(l.innerText)));
+      }} catch (_) {{}}
+    }}
+    const wrappingLabel = host.closest('label');
+    if (wrappingLabel) candidates.push(clean(wrappingLabel.innerText));
+    candidates.push(clean(el.getAttribute('aria-label') || ''));
+    for (let text of candidates) {{
+      if (!text) continue;
+      text = text
+        .replace(/[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}/gi, ' ')
+        .replace(/\\bcards?\\[[^\\]]*\\]/gi, ' ')
+        .replace(/\\b[a-z-]*(?:card-field-input|select__input|input__single-line)[a-z-]*\\b/gi, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+      // Labels are frequently duplicated by the surrounding markup.
+      const half = text.slice(0, Math.floor(text.length / 2)).trim();
+      if (half && text.slice(Math.floor(text.length / 2)).trim() === half) text = half;
+      if (text.length >= 8 && text.length <= 300) return text;
+    }}
+    return '';
+  }}
 
   function labelText(el) {{
     const pieces = [
@@ -969,6 +1011,26 @@ def _autofill_script(facts: dict[str, str]) -> str:
     el.dataset.hybridNeedsLlm = 'true';
     if (reason) el.dataset.hybridNeedsLlmReason = reason;
     pushLimited(result.needsLlm, `${{reason || 'empty'}}: ${{fieldSummary(el)}}`);
+    recordOpenQuestion(el);
+  }}
+
+  function controlKind(el) {{
+    if (el.tagName === 'SELECT') return 'select';
+    if (norm(el.getAttribute('role')) === 'combobox' || norm(el.className || '').includes('select')) return 'select';
+    if (el.tagName === 'TEXTAREA') return 'textarea';
+    return norm(el.type) || 'text';
+  }}
+
+  function recordOpenQuestion(el) {{
+    const question = questionText(el);
+    if (!question) return;
+    if (result.openQuestions.some((item) => item.question === question)) return;
+    if (result.openQuestions.length >= 24) return;
+    result.openQuestions.push({{
+      question,
+      type: controlKind(el),
+      required: isRequiredControl(el, labelText(el)),
+    }});
   }}
 
   function markRequiredEmpty(el, reason = 'required-empty') {{
