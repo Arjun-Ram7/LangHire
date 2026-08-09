@@ -259,6 +259,36 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
         self.assertEqual(values["addr"], "504 Hunt Club Rd", result["debugInputs"])
 
+    def test_veteran_and_disability_comboboxes_are_answered(self):
+        # Veteran and disability rules existed only on the <select> path, so the
+        # combobox form of the same questions was never matched at all.
+        result, _ = self.run_fixture(
+            """
+            <div class="q"><label for="vet">Veteran status</label>
+              <input id="vet" role="combobox" class="select__input" required></div>
+            <div class="q"><label for="dis">Disability status</label>
+              <input id="dis" role="combobox" class="select__input" required></div>
+            """,
+            {**WORKDAY_FACTS, "veteran_status": "Not a veteran", "disability_status": "No"},
+        )
+
+        picked = {item["id"]: item["picked"] for item in result["debugInputs"]}
+        self.assertEqual(picked.get("vet"), "veteran_status", result["debugInputs"])
+        self.assertEqual(picked.get("dis"), "disability_status", result["debugInputs"])
+
+    def test_sexual_orientation_select_is_answered_from_facts(self):
+        result, values = self.run_fixture(
+            """
+            <div class="q"><label for="so">How would you describe your sexual orientation?</label>
+              <select id="so" required><option value="">Select</option>
+                <option>Heterosexual</option><option>Gay</option>
+                <option>I don't wish to answer</option></select></div>
+            """,
+            {**WORKDAY_FACTS, "sexual_orientation": "Heterosexual"},
+        )
+
+        self.assertEqual(values["so"], "Heterosexual", result["debugInputs"])
+
     def test_yes_no_f1_visa_question_is_answered_yes(self):
         # "Are you currently on an F-1 visa?" offers Yes/No, but the rule
         # returned the visa_status text ("F-1 student visa"), which is not one
