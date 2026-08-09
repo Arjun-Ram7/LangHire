@@ -1727,6 +1727,9 @@ def _autofill_script(facts: dict[str, str]) -> str:
     else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['month', 'mm'])) [field, value] = ['date_of_birth_month', optionValueFor(select, 'date_of_birth_month', facts.date_of_birth_month)];
     else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['day', 'dd'])) [field, value] = ['date_of_birth_day', optionValueFor(select, 'date_of_birth_day', facts.date_of_birth_day)];
     else if (has(text, ['birth', 'dob', 'date of birth']) && has(text, ['year', 'yyyy'])) [field, value] = ['date_of_birth_year', optionValueFor(select, 'date_of_birth_year', facts.date_of_birth_year)];
+    // "Are you currently on an F-1 visa?" offers Yes/No, not a list of statuses.
+    // Answering it with the visa_status text matched no option and left it blank.
+    else if (has(text, ['f 1', 'f1', 'f-1']) && yesNoValue(select, true)) [field, value] = ['f1_visa_status', yesNoValue(select, factBool('f1_visa_status') !== false)];
     else if (has(text, ['visa type', 'visa status', 'immigration status', 'student status', 'f 1', 'f1', 'f-1'])) [field, value] = ['visa_status', optionValueFor(select, 'visa_status', facts.visa_status || facts.f1_status || facts.f1_visa_status || facts.current_work_status)];
     else if (has(text, ['country of citizenship', 'citizenship country', 'citizenship'])) [field, value] = ['citizenship', optionValueFor(select, 'citizenship', facts.citizenship || facts.nationality)];
     else if (has(text, ['nationality', 'country of nationality'])) [field, value] = ['nationality', optionValueFor(select, 'nationality', facts.nationality || facts.citizenship)];

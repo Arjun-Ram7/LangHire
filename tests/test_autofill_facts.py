@@ -209,6 +209,22 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_yes_no_f1_visa_question_is_answered_yes(self):
+        # "Are you currently on an F-1 visa?" offers Yes/No, but the rule
+        # returned the visa_status text ("F-1 student visa"), which is not one
+        # of the options, so the question was left blank.
+        result, values = self.run_fixture(
+            """
+            <div class="field"><label for="f1">Are you currently on an F-1 visa?</label>
+              <select id="f1" required><option value="">Select</option>
+                <option>Yes</option><option>No</option></select></div>
+            """,
+            {**WORKDAY_FACTS, "f1_visa_status": "yes", "visa_status": "F-1 student visa"},
+        )
+
+        self.assertEqual(values["f1"], "Yes", result)
+        self.assertEqual(result["requiredEmpty"], 0)
+
     def test_gender_radio_does_not_select_female_for_a_male_candidate(self):
         # valueMatchesFact compared with substrings, and "female" contains
         # "male", so the Female option matched a Male candidate and a wrong
