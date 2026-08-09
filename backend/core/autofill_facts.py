@@ -2383,6 +2383,51 @@ def _autofill_script(facts: dict[str, str]) -> str:
 
   collectVisibleErrors();
 
+  // Hand the agent exactly one field at a time, in document order. Every
+  // unresolved control below the topmost one is taken out of browser_use's
+  // interactive-element index, so bouncing between fields is impossible rather
+  // than merely discouraged by the prompt. Deferral is reversed as soon as the
+  // field above is answered or abandoned, so each field gets its turn.
+  function gateUnresolvedFieldsToDocumentOrder() {{
+    const unresolved = allElements('input, select, textarea, [role="combobox"], [contenteditable="true"]')
+      .filter((el) => visible(el)
+        && !el.disabled
+        && !el.readOnly
+        && !isAbandoned(el)
+        && el.dataset.staticAutocompleteSelected === undefined
+        // A control static autofill deliberately passed over (an optional
+        // search box, a phone extension) must not hold the single active slot
+        // and stall every real question below it.
+        && el.dataset.staticAutofillSkipped === undefined
+        // File inputs read as permanently empty and are driven by the separate
+        // resume-upload step, not by the agent.
+        && norm(el.type) !== 'file'
+        && norm(el.type) !== 'hidden'
+        && isEffectivelyEmpty(el));
+    unresolved.forEach((el, index) => {{
+      if (index === 0) {{
+        if (el.dataset.staticDeferred === 'true') {{
+          delete el.dataset.staticDeferred;
+          try {{
+            el.style.pointerEvents = '';
+            el.removeAttribute('aria-disabled');
+            el.removeAttribute('tabindex');
+          }} catch (_) {{}}
+        }}
+        return;
+      }}
+      if (el.dataset.staticDeferred === 'true') return;
+      el.dataset.staticDeferred = 'true';
+      try {{
+        el.style.pointerEvents = 'none';
+        el.setAttribute('aria-disabled', 'true');
+        el.setAttribute('tabindex', '-1');
+      }} catch (_) {{}}
+    }});
+  }}
+
+  gateUnresolvedFieldsToDocumentOrder();
+
   return result;
 }})();
 """

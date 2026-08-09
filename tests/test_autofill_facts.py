@@ -171,6 +171,54 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_only_the_first_unresolved_field_stays_interactive(self):
+        # Order is enforced structurally, not by asking the model to behave:
+        # every unresolved field below the topmost one is taken out of the
+        # interactive element index, so the agent has exactly one field it can
+        # act on and cannot bounce between them.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="q1">First custom question</label>
+                  <input id="q1" required></div>
+                <div class="field"><label for="q2">Second custom question</label>
+                  <input id="q2" required></div>
+                <div class="field"><label for="q3">Third custom question</label>
+                  <input id="q3" required></div>
+                """
+            )
+
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+
+            self.assertIsNone(page.locator("#q1").get_attribute("aria-disabled"))
+            self.assertEqual(page.locator("#q2").get_attribute("aria-disabled"), "true")
+            self.assertEqual(page.locator("#q3").get_attribute("aria-disabled"), "true")
+        finally:
+            page.close()
+
+    def test_next_field_opens_up_once_the_one_above_it_is_resolved(self):
+        # Answering the top field must hand the turn to the next one down.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="q1">First custom question</label>
+                  <input id="q1" required></div>
+                <div class="field"><label for="q2">Second custom question</label>
+                  <input id="q2" required></div>
+                """
+            )
+            script = _autofill_script(WORKDAY_FACTS)
+
+            page.evaluate(script)
+            page.locator("#q1").fill("an answer")
+            page.evaluate(script)
+
+            self.assertIsNone(page.locator("#q2").get_attribute("aria-disabled"))
+        finally:
+            page.close()
+
     def test_unanswerable_field_is_abandoned_after_three_attempts(self):
         # The agent must not loop on one field forever. Static autofill runs
         # after every agent step, so a field that is still blank on three
