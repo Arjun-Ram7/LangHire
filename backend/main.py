@@ -1269,8 +1269,14 @@ async def auth_login(service: str):
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
                 _log.info("Playwright started, launching persistent context...")
-                # Find actual Chromium binary (critical for frozen/PyInstaller builds)
-                chromium_path = _find_playwright_chromium()
+                # Log in with the same browser the automation runs use. Cookies
+                # are encrypted per browser, so a login saved by a different
+                # binary cannot be read back during an apply run.
+                try:
+                    from core.shared_config import resolve_browser_executable
+                except ImportError:
+                    from backend.core.shared_config import resolve_browser_executable
+                chromium_path = resolve_browser_executable() or _find_playwright_chromium()
                 launch_args = ["--no-first-run", "--no-default-browser-check"]
                 if sys.platform == "linux":
                     launch_args.append("--no-sandbox")
