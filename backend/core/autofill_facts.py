@@ -1821,8 +1821,16 @@ def _autofill_script(facts: dict[str, str]) -> str:
       if (valueText.includes('asian')) return true;
       if (factText.includes('asian indian') && valueText.includes('asian indian')) return true;
     }}
+    // "female" contains "male", so substring comparison silently matched the
+    // Female option for a male candidate and submitted the wrong answer.
+    // Gender words are compared on whole words only, in both directions.
+    const isFemaleWord = (text) => /\\bfemale\\b|\\bwoman\\b|\\bwomen\\b/.test(text);
+    const isMaleWord = (text) => /\\bmale\\b|\\bman\\b|\\bmen\\b/.test(text) && !isFemaleWord(text);
+    if (isMaleWord(factText) && isFemaleWord(valueText)) return false;
+    if (isFemaleWord(factText) && isMaleWord(valueText)) return false;
     if (valueText === factText || valueText.includes(factText) || factText.includes(valueText)) return true;
-    if (factText.includes('male') && valueText.includes('male')) return true;
+    if (isMaleWord(factText) && isMaleWord(valueText)) return true;
+    if (isFemaleWord(factText) && isFemaleWord(valueText)) return true;
     if (factText.includes('he') && valueText.includes('he') && valueText.includes('him')) return true;
     if (factText.includes('not a veteran') && valueText.includes('not') && valueText.includes('veteran')) return true;
     if (factText.includes('no') && valueText.includes('do not') && valueText.includes('disability')) return true;
