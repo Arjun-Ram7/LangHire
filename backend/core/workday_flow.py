@@ -211,6 +211,8 @@ def _summarize_review(review: dict) -> dict:
         "verification_code_required": bool(review.get("verificationCodeRequired")),
         "credential_error": bool(review.get("credentialError")),
         "needs_llm": (review.get("needsLlm") or [])[:8],
+        "abandoned": int(review.get("abandoned") or 0),
+        "abandoned_labels": (review.get("abandonedLabels") or [])[:8],
         "required_empty_labels": (review.get("requiredEmptyLabels") or [])[:8],
         "visible_errors": (review.get("visibleErrors") or [])[:8],
         "matches": (review.get("matches") or [])[:24],
