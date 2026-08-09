@@ -69,6 +69,7 @@ _FACT_ORDER = [
     "date_of_birth_day",
     "date_of_birth_year",
     "age",
+    "todays_date",
     "age_over_18",
     "work_authorization",
     "current_work_status",
@@ -274,6 +275,9 @@ def _default_facts(profile: dict[str, Any], settings: dict[str, Any] | None = No
         "date_of_birth_day": dob_parts.get("day", ""),
         "date_of_birth_year": dob_parts.get("year", ""),
         "age": _profile_value(profile, "age"),
+        # EEO self-identification forms ask the candidate to date their
+        # signature, which is always the day the form is filled in.
+        "todays_date": date.today().strftime("%m/%d/%Y"),
         "age_over_18": _profile_value(profile, "age_over_18"),
         "work_authorization": _string(profile.get("work_authorization")),
         "current_work_status": _profile_value(profile, "current_work_status"),
@@ -1352,6 +1356,18 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (has(text, ['require sponsorship', 'need sponsorship', 'needs sponsorship', 'visa sponsorship', 'sponsor you', 'sponsorship for employment', 'sponsorship to work'])) return ['visa_sponsorship_needed', (factBool('visa_sponsorship_needed') || factBool('future_sponsorship_needed') || factBool('h1b_sponsorship_needed')) ? 'Yes' : 'No'];
     if (has(text, ['work status', 'employment authorization'])) return ['current_work_status', facts.current_work_status || facts.work_authorization];
     if (has(text, ['work authorization', 'authorization status'])) return ['work_authorization', facts.work_authorization];
+    // A date field must never fall through to the location/address rules below.
+    // A MM/DD/YYYY signature date matched "location" through neighbouring label
+    // text and was filled with "Blacksburg, Virginia".
+    const dateish = has(text, ['mm dd yyyy', 'dd mm yyyy', 'yyyy mm dd', 'signature date', 'date signed'])
+      || (has(text, ['date']) && !hasAny(text, ['candidate', 'update', 'validate', 'mandate']));
+    if (dateish && has(text, ['signature', 'signed', 'today'])) return ['todays_date', facts.todays_date];
+    if (dateish) return [null, null];
+    // A school question can name a country without asking for one ("we recruit
+    // from universities across the country"), so school wins over country.
+    if (has(text, ['university', 'college', 'school']) && !has(text, ['school district', 'high school'])) return ['school', facts.school];
+    if (has(text, ['preferred name', 'preferred first name', 'nickname', 'what would you like us to call you', 'go by'])) return ['first_name', facts.preferred_name || facts.first_name];
+    if (has(text, ['legal address', 'mailing address', 'street address', 'residential address'])) return ['street_address', facts.street_address];
     if (has(text, ['first name', 'firstname', 'given name', 'givenname'])) return ['first_name', facts.first_name];
     if (has(text, ['last name', 'lastname', 'family name', 'familyname', 'surname'])) return ['last_name', facts.last_name];
     if (has(text, ['full name', 'legal full name']) && !has(text, ['company name', 'employer name', 'school name'])) return ['full_name', facts.full_name];
