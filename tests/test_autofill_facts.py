@@ -209,6 +209,30 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_gender_radio_does_not_select_female_for_a_male_candidate(self):
+        # valueMatchesFact compared with substrings, and "female" contains
+        # "male", so the Female option matched a Male candidate and a wrong
+        # demographic answer was submitted.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <fieldset><legend>Gender</legend>
+                  <label><input type="radio" name="g" value="Male" required> Male</label>
+                  <label><input type="radio" name="g" value="Female"> Female</label>
+                </fieldset>
+                """
+            )
+
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+
+            checked = page.eval_on_selector_all(
+                'input[name="g"]', "els => els.filter(e => e.checked).map(e => e.value)"
+            )
+            self.assertEqual(checked, ["Male"])
+        finally:
+            page.close()
+
     def test_value_rejected_by_the_page_is_not_counted_as_filled(self):
         # React-controlled inputs discard a programmatic value and re-render
         # their own. Counting the write instead of the result is what produced
