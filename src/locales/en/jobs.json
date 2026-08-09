@@ -8,7 +8,8 @@
     "applied": "Applied",
     "failed": "Failed",
     "blocked": "Blocked",
-    "inProgress": "In Progress"
+    "inProgress": "In Progress",
+    "manualReview": "Manual Review"
   },
   "filter": {
     "all": "All"
@@ -20,7 +21,7 @@
     "description": "Search for job listings matching your profile. Select a source platform, enter a job title, and start collecting. Collection typically takes 3-10 minutes per job title as the agent scrolls through results.",
     "loginInfo": "<strong>Login:</strong> A browser will open and check if you're logged into the selected platform. If not, the agent will wait for you to log in manually — then proceed automatically.",
     "sourcePlatform": "Source Platform",
-    "jobTitlePlaceholder": "Job title (e.g. 'Data Analyst') or leave blank for all",
+    "jobTitlePlaceholder": "Job titles separated by commas (or blank for all)",
     "maxJobsPlaceholder": "Max jobs",
     "maxJobsTitle": "Max jobs to collect (per title)",
     "stop": "Stop",
