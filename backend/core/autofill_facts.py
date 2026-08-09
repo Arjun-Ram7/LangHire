@@ -952,7 +952,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
 
   function markNeedsLlm(el, reason) {{
     if (isAbandoned(el)) return;
-    if (!countedThisPass.has(el)) {{
+    // A deferred field is not interactive yet, so this pass was never an
+    // attempt on it. Counting it would abandon a question before the agent
+    // could reach it.
+    if (!countedThisPass.has(el) && el.dataset.staticDeferred !== 'true') {{
       countedThisPass.add(el);
       const attempts = Number(el.dataset.staticUnresolvedPasses || 0) + 1;
       el.dataset.staticUnresolvedPasses = String(attempts);

@@ -372,6 +372,34 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_deferred_fields_do_not_burn_attempts_before_their_turn(self):
+        # Only the topmost unresolved field is interactive, so the ones below it
+        # have not been attempted yet. Counting passes against them would
+        # abandon a question before the agent could ever reach it.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="q1">First custom question</label>
+                  <input id="q1" required></div>
+                <div class="field"><label for="q2">Second custom question</label>
+                  <input id="q2" required></div>
+                """
+            )
+            script = _autofill_script(WORKDAY_FACTS)
+
+            for _ in range(4):
+                page.evaluate(script)
+
+            self.assertEqual(
+                page.locator("#q1").get_attribute("data-static-abandoned"), "true"
+            )
+            self.assertIsNone(
+                page.locator("#q2").get_attribute("data-static-abandoned")
+            )
+        finally:
+            page.close()
+
     def test_unanswerable_field_is_abandoned_after_three_attempts(self):
         # The agent must not loop on one field forever. Static autofill runs
         # after every agent step, so a field that is still blank on three
