@@ -85,6 +85,48 @@ def find_playwright_chromium() -> str | None:
     return None
 
 
+def find_installed_brave() -> str | None:
+    """Return the locally installed Brave executable, if present.
+
+    The automation profile's cookies are encrypted with a Keychain key that is
+    scoped to the browser that wrote them, so switching browsers silently drops
+    every saved login. Brave is preferred because it is the browser the profile
+    was created with.
+    """
+    candidates = {
+        "darwin": (
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            str(Path.home() / "Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+        ),
+        "win32": (
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ),
+        "linux": (
+            "/usr/bin/brave-browser",
+            "/usr/bin/brave",
+            "/snap/bin/brave",
+        ),
+    }
+    for candidate in candidates.get(sys.platform, candidates["linux"]):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def resolve_browser_executable() -> str | None:
+    """Pick the browser binary used for automation.
+
+    ``LANGHIRE_BROWSER_PATH`` overrides everything, then an installed Brave,
+    then a Playwright-managed Chromium. Returning ``None`` leaves the choice to
+    browser-use.
+    """
+    override = (os.environ.get("LANGHIRE_BROWSER_PATH") or "").strip()
+    if override and Path(override).is_file():
+        return override
+    return find_installed_brave() or find_playwright_chromium()
+
+
 def browser_session_kwargs() -> dict:
     """Shared local BrowserSession launch options."""
     # browser-use normally suppresses window focus so unattended agents do not
@@ -112,7 +154,7 @@ def browser_session_kwargs() -> dict:
         # not required for LangHire's DOM-based form filling.
         "enable_default_extensions": False,
     }
-    executable = find_playwright_chromium()
+    executable = resolve_browser_executable()
     if executable:
         kwargs["executable_path"] = executable
     return kwargs
