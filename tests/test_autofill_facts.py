@@ -171,6 +171,73 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_unanswerable_field_is_abandoned_after_three_attempts(self):
+        # The agent must not loop on one field forever. Static autofill runs
+        # after every agent step, so a field that is still blank on three
+        # consecutive passes has had three attempts and is abandoned: it is
+        # dropped from the agent's interactive element index (pointer-events,
+        # aria-disabled, tabindex) so the next unresolved field below it
+        # becomes the only thing left to act on.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field">
+                  <label for="essay">Describe the most impressive thing you have ever built.</label>
+                  <textarea id="essay" required></textarea>
+                </div>
+                """
+            )
+            script = _autofill_script(WORKDAY_FACTS)
+
+            first = page.evaluate(script)
+            second = page.evaluate(script)
+            self.assertEqual(first["abandoned"], 0, first)
+            self.assertEqual(second["abandoned"], 0, second)
+            self.assertTrue(
+                any("essay" in entry for entry in second["needsLlm"]), second["needsLlm"]
+            )
+
+            third = page.evaluate(script)
+
+            self.assertEqual(third["abandoned"], 1, third)
+            self.assertEqual(
+                page.locator("#essay").get_attribute("aria-disabled"), "true"
+            )
+            self.assertFalse(
+                any("essay" in entry for entry in third["needsLlm"]), third["needsLlm"]
+            )
+        finally:
+            page.close()
+
+    def test_field_filled_before_the_cap_is_never_abandoned(self):
+        # Abandonment must only ever apply to fields nothing could fill. A field
+        # the agent completes on its second attempt stays live and answered.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field">
+                  <label for="essay">Describe the most impressive thing you have ever built.</label>
+                  <textarea id="essay" required></textarea>
+                </div>
+                """
+            )
+            script = _autofill_script(WORKDAY_FACTS)
+
+            page.evaluate(script)
+            page.locator("#essay").fill("A distributed build cache.")
+            page.evaluate(script)
+            result = page.evaluate(script)
+
+            self.assertEqual(result["abandoned"], 0, result)
+            self.assertIsNone(page.locator("#essay").get_attribute("aria-disabled"))
+            self.assertEqual(
+                page.locator("#essay").input_value(), "A distributed build cache."
+            )
+        finally:
+            page.close()
+
     def test_lever_card_question_text_reaches_the_matcher(self):
         # Lever wraps each custom question as
         #   li.application-question > div.application-label (question text)

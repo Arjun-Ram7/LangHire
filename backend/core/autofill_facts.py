@@ -440,8 +440,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
     selects: 0,
     choices: 0,
     locked: 0,
+    abandoned: 0,
     url: location.href,
     needsLlm: [],
+    abandonedLabels: [],
     requiredEmptyLabels: [],
     visibleErrors: [],
     matches: [],
@@ -884,7 +886,47 @@ def _autofill_script(facts: dict[str, str]) -> str:
     return has(text, ['required', 'please provide', 'must enter', 'must select']);
   }}
 
+  // Static autofill re-runs after every agent step, so a control that is still
+  // unresolved on this pass has just survived one more attempt. Three attempts
+  // is the cap: past that the control is abandoned and dropped from
+  // browser_use's interactive-element index, which is what actually stops the
+  // agent looping on one field. Prompt instructions alone were not enough —
+  // the cleanup model keeps returning to a field it cannot answer.
+  const ABANDON_AFTER_ATTEMPTS = 3;
+
+  function isAbandoned(el) {{
+    return el.dataset.staticAbandoned === 'true';
+  }}
+
+  function abandonField(el) {{
+    el.dataset.staticAbandoned = 'true';
+    result.abandoned += 1;
+    pushLimited(result.abandonedLabels, fieldSummary(el));
+    // Deliberately not setting `disabled`: browsers omit disabled controls from
+    // FormData, which would strip a partially typed answer from the real
+    // submission. This combination blocks interaction without that side effect.
+    try {{
+      el.style.pointerEvents = 'none';
+      el.setAttribute('aria-disabled', 'true');
+      el.setAttribute('tabindex', '-1');
+    }} catch (_) {{}}
+  }}
+
+  // A control can reach markNeedsLlm twice in one pass (once as required-empty,
+  // once as unknown-text). Count one attempt per control per pass.
+  const countedThisPass = new Set();
+
   function markNeedsLlm(el, reason) {{
+    if (isAbandoned(el)) return;
+    if (!countedThisPass.has(el)) {{
+      countedThisPass.add(el);
+      const attempts = Number(el.dataset.staticUnresolvedPasses || 0) + 1;
+      el.dataset.staticUnresolvedPasses = String(attempts);
+      if (attempts >= ABANDON_AFTER_ATTEMPTS) {{
+        abandonField(el);
+        return;
+      }}
+    }}
     el.dataset.hybridNeedsLlm = 'true';
     if (reason) el.dataset.hybridNeedsLlmReason = reason;
     pushLimited(result.needsLlm, `${{reason || 'empty'}}: ${{fieldSummary(el)}}`);
