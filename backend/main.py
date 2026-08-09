@@ -989,13 +989,21 @@ async def start_applying(body: ApplyRequest):
                 "Starting efficient review queue: deterministic fill first, "
                 "bounded Gemini fallback, no final submission."
             )
+            # Setting LANGHIRE_DETERMINISTIC_ONLY runs the static engine with no
+            # LLM at all: fields it knows get filled, everything else is banked
+            # as a question for the candidate to answer once on the Q&A page.
+            deterministic_only = os.environ.get(
+                "LANGHIRE_DETERMINISTIC_ONLY", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if deterministic_only:
+                print("Deterministic-only mode: no LLM cleanup; unanswered questions will be banked.")
             stats = await run_review_queue(
                 pending,
                 profile,
                 cancel_flag=_apply_status,
                 easy_apply=None,
                 passes=8,
-                llm_cleanup=True,
+                llm_cleanup=not deterministic_only,
                 llm_steps=35,
                 llm_timeout=300.0,
                 allow_safe_submit=False,
