@@ -1779,9 +1779,14 @@ def _autofill_script(facts: dict[str, str]) -> str:
     else if (has(text, ['opt'])) [field, value] = ['opt_status', optionValueFor(select, 'opt_status', facts.opt_status || facts.opt_eligible) || yesNoValue(select, factBool('opt_eligible'))];
     else if (has(text, ['18', 'age'])) [field, value] = ['age_over_18', yesNoValue(select, factBool('age_over_18'))];
     else if (has(text, ['relocate'])) [field, value] = ['willing_to_relocate', yesNoValue(select, factBool('willing_to_relocate'))];
+    // Label text absorbs neighbouring questions on dense EEO forms, so the more
+    // specific phrase has to be tested first. "How would you describe your
+    // sexual orientation?" sitting under a "Disability status" question was
+    // being answered as disability, matched no option, and stayed blank.
+    else if (has(text, ['sexual orientation'])) [field, value] = ['sexual_orientation', optionValueFor(select, 'sexual_orientation', facts.sexual_orientation)];
     else if (has(text, ['veteran'])) [field, value] = ['veteran_status', optionValueFor(select, 'veteran_status', facts.veteran_status) || yesNoValue(select, false)];
     else if (has(text, ['disability'])) [field, value] = ['disability_status', optionValueFor(select, 'disability_status', facts.disability_status) || yesNoValue(select, false)];
-    else if (has(text, ['sexual orientation', 'orientation'])) [field, value] = ['sexual_orientation', optionValueFor(select, 'sexual_orientation', facts.sexual_orientation)];
+    else if (has(text, ['orientation'])) [field, value] = ['sexual_orientation', optionValueFor(select, 'sexual_orientation', facts.sexual_orientation)];
     else if (has(text, ['pronoun'])) [field, value] = ['pronouns', optionValueFor(select, 'pronouns', facts.pronouns)];
     else if (has(text, ['gender', 'sex'])) [field, value] = ['gender', optionValueFor(select, 'gender', facts.gender)];
     else if (has(text, ['race', 'ethnicity'])) [field, value] = ['race_ethnicity', optionValueFor(select, 'race_ethnicity', facts.race_ethnicity) || optionValueFor(select, 'race_ethnicity', 'asian')];
