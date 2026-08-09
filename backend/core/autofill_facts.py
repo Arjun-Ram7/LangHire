@@ -1257,7 +1257,16 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (has(text, ['graduation term', 'expected grad term'])) return ['graduation_term', facts.graduation_term || facts.graduation];
     if (has(text, ['graduation date', 'grad date', 'expected graduation date', 'completion date'])) return ['graduation_date', facts.graduation_date || facts.graduation];
     if (has(text, ['graduation', 'graduate', 'expected grad', 'completion year', 'end date'])) return ['graduation', facts.graduation_term || facts.graduation];
-    if (has(text, ['current employer', 'recent employer', 'most recent employer', 'employer', 'current company', 'company'])) return ['current_employer', facts.current_employer];
+    // A screening question can mention an employer without asking for one
+    // ("...job duties for a company by any restrictive covenants..."). Treating
+    // it as the current-employer field both answers it wrongly and consumes the
+    // control, so it never reaches the LLM either.
+    const screeningQuestion = hasAny(text, [
+      'are you', 'do you', 'have you', 'will you', 'did you',
+      'restrictive covenant', 'non compete', 'noncompete', 'non solicitation',
+      'prohibited', 'confidentiality agreement',
+    ]);
+    if (!screeningQuestion && has(text, ['current employer', 'recent employer', 'most recent employer', 'employer', 'current company', 'company'])) return ['current_employer', facts.current_employer];
     if (has(text, ['current role', 'current title', 'job title'])) return ['current_role', facts.current_role];
     if (has(text, ['years of experience', 'experience years'])) return ['years_of_experience', facts.years_of_experience];
     if (has(text, ['prior internship', 'previous internship', 'number of internships', 'how many internships'])) return ['prior_internships', facts.prior_internships || '0'];

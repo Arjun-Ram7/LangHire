@@ -171,6 +171,42 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_greenhouse_disability_question_is_not_matched_as_major(self):
+        # Greenhouse's standard disability question contains the phrase
+        # "one or more of your major life activities". The word "major" matched
+        # the field-of-study rule, so the question was consumed by the major
+        # rule: never answered, and never offered to the LLM either.
+        result, _ = self.run_fixture(
+            """
+            <div class="field">
+              <label for="disability-q">Do you have a disability or chronic condition (physical, visual,
+                auditory, cognitive, mental, emotional, or other) that substantially limits one or more
+                of your major life activities?</label>
+              <input id="disability-q" class="select__input" role="combobox" required>
+            </div>
+            """,
+            {**WORKDAY_FACTS, "major": "Computer Science"},
+        )
+
+        picked = {item["id"]: item["picked"] for item in result["debugInputs"]}
+        self.assertNotEqual(picked.get("disability-q"), "major", result["debugInputs"])
+
+    def test_restrictive_covenant_question_is_not_matched_as_current_employer(self):
+        # "...any job duties for a company by any restrictive covenants..."
+        # contains "company", which matched the current-employer rule.
+        result, values = self.run_fixture(
+            """
+            <div class="field">
+              <label for="covenant-q">Are you prohibited or limited in your performance of any job duties
+                for a company by any restrictive covenants not to compete or confidentiality agreements?</label>
+              <input id="covenant-q" required>
+            </div>
+            """,
+            {**WORKDAY_FACTS, "current_employer": "Acme Corp"},
+        )
+
+        self.assertNotEqual(values["covenant-q"], "Acme Corp", result["debugInputs"])
+
     def test_workday_applicant_privacy_policy_is_safely_accepted(self):
         page = self.browser.new_page()
         try:
