@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.core.workday_flow import (
     WorkdayDeterministicUnavailable,
+    _cleanup_succeeded,
     is_workday_url,
     run_workday_deterministic,
 )
@@ -144,3 +145,26 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupSucceededTests(unittest.TestCase):
+    def test_agent_success_with_required_blanks_is_not_a_success(self):
+        # The cleanup agent reported success after four steps while eight
+        # required fields were still empty, so the job was recorded as finished
+        # when it was not.
+        review = {"requiredEmpty": 8, "needsLlm": ["required-empty: cards[abc][field0]"]}
+
+        self.assertFalse(_cleanup_succeeded(True, review))
+
+    def test_agent_success_with_nothing_left_is_a_success(self):
+        self.assertTrue(_cleanup_succeeded(True, {"requiredEmpty": 0, "needsLlm": []}))
+
+    def test_agent_failure_is_never_upgraded_to_success(self):
+        self.assertFalse(_cleanup_succeeded(False, {"requiredEmpty": 0, "needsLlm": []}))
+
+    def test_abandoned_fields_do_not_block_success(self):
+        # A field abandoned after three attempts is a deliberate hand-off to the
+        # human, not unfinished cleanup work.
+        review = {"requiredEmpty": 1, "needsLlm": [], "abandoned": 1}
+
+        self.assertTrue(_cleanup_succeeded(True, review))

@@ -660,6 +660,24 @@ async def _static_fill_passes(
     return review
 
 
+def _cleanup_succeeded(agent_reported_success: bool, last_review: dict | None) -> bool:
+    """Decide whether cleanup really finished the form.
+
+    The agent's own verdict is not sufficient: one run reported success after
+    four steps while eight required fields were still empty. Fields abandoned
+    after their attempt cap are excluded, since those are a deliberate hand-off
+    to the human rather than unfinished work.
+    """
+    if not agent_reported_success:
+        return False
+    review = last_review or {}
+    if review.get("abandoned"):
+        return True
+    if int(review.get("requiredEmpty") or 0):
+        return False
+    return not (review.get("needsLlm") or [])
+
+
 async def _run_llm_cleanup(
     browser: BrowserSession,
     *,
@@ -899,7 +917,9 @@ async def _run_llm_cleanup(
         )
         result = await asyncio.wait_for(agent.run(max_steps=max_steps), timeout=timeout)
         try:
-            state["success"] = bool(result.is_successful())
+            state["success"] = _cleanup_succeeded(
+                bool(result.is_successful()), state.get("last_review")
+            )
         except Exception:
             state["success"] = False
         try:
