@@ -62,7 +62,7 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         try:
             page.set_content(html)
             result = page.evaluate(_autofill_script(facts or WORKDAY_FACTS))
-            values = page.locator("input, select").evaluate_all(
+            values = page.locator("input, select, textarea").evaluate_all(
                 "els => Object.fromEntries(els.map(el => [el.id, el.value]))"
             )
             return result, values
@@ -258,6 +258,94 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         )
 
         self.assertEqual(values["addr"], "504 Hunt Club Rd", result["debugInputs"])
+
+    def test_banked_answer_fills_a_question_no_rule_matches(self):
+        # The whole point of banking: answer once, then it is filled
+        # deterministically, before any LLM runs.
+        result, values = self.run_fixture(
+            """
+            <li class="application-question">
+              <div class="application-label">What is the hardest technical challenge you have faced?</div>
+              <div class="application-field">
+                <textarea id="hard" name="cards[abc][field1]" class="card-field-input" required></textarea>
+              </div>
+            </li>
+            """,
+            {
+                **WORKDAY_FACTS,
+                "__qa__": {
+                    "What is the hardest technical challenge you have faced?":
+                        "Debugging a race condition in a distributed build cache.",
+                },
+            },
+        )
+
+        self.assertEqual(
+            values["hard"],
+            "Debugging a race condition in a distributed build cache.",
+            result["debugInputs"],
+        )
+
+    def test_banked_answer_matches_a_reworded_question(self):
+        # Employers reword the same question. Matching has to survive
+        # punctuation and small wording differences or the bank never pays off.
+        result, values = self.run_fixture(
+            """
+            <li class="application-question">
+              <div class="application-label">Why do you want to work at Acme?</div>
+              <div class="application-field"><textarea id="why" required></textarea></div>
+            </li>
+            """,
+            {**WORKDAY_FACTS, "__qa__": {"why do you want to work at acme": "Because of the systems work."}},
+        )
+
+        self.assertEqual(values["why"], "Because of the systems work.", result["debugInputs"])
+
+    def test_banked_answer_survives_contractions_and_filler_words(self):
+        # Employers write the same question with contractions and different
+        # filler ("What's ... you've faced" vs "What is ... you have faced").
+        # Raw token overlap scores that at 0.55 and the bank never pays off.
+        result, values = self.run_fixture(
+            """
+            <li class="application-question">
+              <div class="application-label">What's the hardest technical challenge you've faced?</div>
+              <div class="application-field"><textarea id="hard" required></textarea></div>
+            </li>
+            """,
+            {
+                **WORKDAY_FACTS,
+                "__qa__": {
+                    "What is the hardest technical challenge you have faced?": "A race condition.",
+                },
+            },
+        )
+
+        self.assertEqual(values["hard"], "A race condition.", result["debugInputs"])
+
+    def test_two_different_short_questions_do_not_share_an_answer(self):
+        # Stripping filler makes short questions dangerously close. Answering
+        # the wrong question is worse than leaving it blank.
+        result, values = self.run_fixture(
+            """
+            <li class="application-question">
+              <div class="application-label">Are you able to relocate?</div>
+              <div class="application-field"><textarea id="relocate" required></textarea></div>
+            </li>
+            """,
+            {**WORKDAY_FACTS, "__qa__": {"Are you able to work weekends?": "Yes"}},
+        )
+
+        self.assertEqual(values["relocate"], "", result["debugInputs"])
+
+    def test_a_fact_rule_still_wins_over_the_bank(self):
+        # The bank is a fallback for questions no rule covers; it must never
+        # override a known fact.
+        result, values = self.run_fixture(
+            '<div class="field"><label for="first">First Name</label><input id="first" required></div>',
+            {**WORKDAY_FACTS, "__qa__": {"first name": "WRONG"}},
+        )
+
+        self.assertEqual(values["first"], "Arjun", result["debugInputs"])
 
     def test_open_questions_are_reported_as_readable_text(self):
         # Questions banked for the user to answer must read like the question on

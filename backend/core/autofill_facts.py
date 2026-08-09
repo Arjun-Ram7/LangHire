@@ -429,7 +429,31 @@ def load_autofill_facts(profile: dict[str, Any], resume_path: str = "") -> dict[
     if derived_age != "":
         merged["age"] = str(derived_age)
         merged["age_over_18"] = "yes" if int(derived_age) >= 18 else "no"
-    return {k: v for k, v in merged.items() if v}
+    facts = {k: v for k, v in merged.items() if v}
+    # Answers the candidate has already given for questions no rule covers.
+    # These fill deterministically, before the LLM is involved at all.
+    banked = _load_banked_answers()
+    if banked:
+        facts["__qa__"] = banked
+    return facts
+
+
+def _load_banked_answers() -> dict[str, str]:
+    """Return answered Q&A pairs from the repository, empty if unavailable."""
+    try:
+        from core.shared_config import get_memory_store
+    except ImportError:
+        try:
+            from backend.core.shared_config import get_memory_store
+        except ImportError:
+            return {}
+    try:
+        store = get_memory_store()
+        if not store:
+            return {}
+        return {q: a for q, a in (store.qa_get_all_for_prompt() or {}).items() if a}
+    except Exception:
+        return {}
 
 
 def format_facts_for_prompt(facts: dict[str, str]) -> str:
@@ -1019,6 +1043,58 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (norm(el.getAttribute('role')) === 'combobox' || norm(el.className || '').includes('select')) return 'select';
     if (el.tagName === 'TEXTAREA') return 'textarea';
     return norm(el.type) || 'text';
+  }}
+
+  // Answers the candidate has given once before, keyed by question text. Used
+  // only where no fact rule matched, so a known fact always wins.
+  const QA_BANK = (() => {{
+    const raw = facts.__qa__ || {{}};
+    const byNormalized = {{}};
+    for (const [question, answer] of Object.entries(raw)) {{
+      if (!answer) continue;
+      byNormalized[normalizeQuestion(question)] = String(answer);
+    }}
+    return byNormalized;
+  }})();
+
+  function normalizeQuestion(text) {{
+    return String(text || '').toLowerCase().replace(/[^a-z0-9\\s]/g, '').replace(/\\s+/g, ' ').trim();
+  }}
+
+  // Question wording varies far more than it means. Comparing raw tokens
+  // scored "What's ... you've faced" against "What is ... you have faced" at
+  // 0.55, well under any safe threshold, so the bank never paid off. Comparing
+  // only the words that carry the meaning fixes that.
+  const QUESTION_FILLER = new Set([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'do', 'does', 'did',
+    'have', 'has', 'had', 'you', 'your', 'yours', 'youve', 'youre', 'we', 'our', 'us',
+    'i', 'my', 'me', 'what', 'whats', 'which', 'who', 'why', 'how', 'when', 'where',
+    'to', 'of', 'in', 'on', 'at', 'for', 'with', 'and', 'or', 'if', 'that', 'this',
+    'it', 'its', 'as', 'any', 'please', 'tell', 'describe', 'share', 'about', 'would',
+    'will', 'can', 'could', 'should', 'ever', 'most', 'much', 'many', 'some',
+  ]);
+
+  function contentTokens(question) {{
+    return new Set(question.split(' ').filter((token) => token && !QUESTION_FILLER.has(token)));
+  }}
+
+  function bankedAnswer(el) {{
+    const question = normalizeQuestion(questionText(el));
+    if (!question) return '';
+    if (QA_BANK[question]) return QA_BANK[question];
+    const asked = contentTokens(question);
+    // Below three content words the remaining tokens are too thin to tell two
+    // questions apart ("able relocate" vs "able work weekends"), and answering
+    // the wrong question is worse than leaving it blank.
+    if (asked.size < 3) return '';
+    for (const [known, answer] of Object.entries(QA_BANK)) {{
+      const other = contentTokens(known);
+      if (other.size < 3) continue;
+      let shared = 0;
+      for (const token of asked) if (other.has(token)) shared += 1;
+      if (shared / Math.max(asked.size, other.size) > 0.85) return answer;
+    }}
+    return '';
   }}
 
   function recordOpenQuestion(el) {{
@@ -1721,6 +1797,16 @@ def _autofill_script(facts: dict[str, str]) -> str:
       if (optionalComboboxSearch) {{
         item.handled = true;
         item.el.dataset.staticAutofillSkipped = 'optional_combobox_search';
+        continue;
+      }}
+      // No fact rule covered this one, so try an answer the candidate has
+      // already given for the same question on an earlier application.
+      const saved = bankedAnswer(item.el);
+      if (saved && fillText(item.el, saved, 'saved_answer')) {{
+        item.field = 'saved_answer';
+        item.value = saved;
+        item.handled = true;
+        pushLimited(result.matches, `saved_answer | bank | 1.00 | ${{fieldSummary(item.el)}}`, 24);
         continue;
       }}
       result.unknownTextboxes += 1;
