@@ -171,6 +171,41 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertEqual(result["requiredEmpty"], 1)
         self.assertTrue(any("Certification Date" in label for label in result["requiredEmptyLabels"]))
 
+    def test_combobox_with_no_matching_option_is_left_blank_not_arrowed_into(self):
+        # The ArrowDown/aria-activedescendant fallback ran for every field, so a
+        # combobox whose options do not contain the answer committed whatever
+        # happened to be highlighted first. A run picked "Aalborg University"
+        # for a candidate whose school is Virginia Tech that way. Taking the
+        # first suggestion is only acceptable for the fields where it is a
+        # deliberate strategy (location, school); elsewhere blank is correct,
+        # because a wrong answer is worse than one the human can finish.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field">
+                  <label for="degree">Degree</label>
+                  <input id="degree" role="combobox" class="select__input"
+                         aria-activedescendant="degree-opt-0" required>
+                  <ul role="listbox">
+                    <li id="degree-opt-0" role="option">Associate's Degree</li>
+                    <li id="degree-opt-1" role="option">Doctorate</li>
+                  </ul>
+                </div>
+                """
+            )
+
+            result = page.evaluate(
+                _autofill_script({**WORKDAY_FACTS, "degree": "Bachelor of Science"})
+            )
+
+            self.assertEqual(result["selects"], 0, result)
+            self.assertIsNone(
+                page.locator("#degree").get_attribute("data-static-autocomplete-selected")
+            )
+        finally:
+            page.close()
+
     def test_value_rejected_by_the_page_is_not_counted_as_filled(self):
         # React-controlled inputs discard a programmatic value and re-render
         # their own. Counting the write instead of the result is what produced
