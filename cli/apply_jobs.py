@@ -40,6 +40,16 @@ try:
         try_controlled_final_submit,
         wait_for_workday_human_checkpoint,
     )
+    from core.workday_flow import (
+        WorkdayDeterministicUnavailable,
+        _current_page,
+        _human_click_timeout_seconds,
+        _page_url,
+        _pause_for_workday_human_click,
+        _wait_for_page_settle,
+        is_workday_url,
+        run_workday_deterministic,
+    )
     from core.config import load_settings
     from memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
     from memory.metrics import MetricsStore
@@ -61,6 +71,16 @@ except ImportError:
         run_static_autofill,
         try_controlled_final_submit,
         wait_for_workday_human_checkpoint,
+    )
+    from backend.core.workday_flow import (
+        WorkdayDeterministicUnavailable,
+        _current_page,
+        _human_click_timeout_seconds,
+        _page_url,
+        _pause_for_workday_human_click,
+        _wait_for_page_settle,
+        is_workday_url,
+        run_workday_deterministic,
     )
     from backend.core.config import load_settings
     from backend.memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
@@ -127,50 +147,6 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _human_click_timeout_seconds() -> float:
-    try:
-        return max(5.0, float(os.environ.get("LANGHIRE_HUMAN_CLICK_TIMEOUT_SECONDS", "300")))
-    except (TypeError, ValueError):
-        return 300.0
-
-
-async def _pause_for_workday_human_click(
-    browser: BrowserSession,
-    worker_id: int,
-    initial: dict | None = None,
-) -> dict:
-    checkpoint = initial if isinstance(initial, dict) else None
-    if not checkpoint or not checkpoint.get("required"):
-        checkpoint = await probe_workday_human_checkpoint(browser)
-    if not checkpoint.get("required"):
-        return {**checkpoint, "completed": False, "timed_out": False}
-
-    while checkpoint.get("required"):
-        action = str(checkpoint.get("action") or "Create Account")
-        print(
-            f"    🖱️  [W{worker_id}] LangHire paused — click {action} in Workday; "
-            "AI will resume automatically"
-        )
-        result = await wait_for_workday_human_checkpoint(
-            browser,
-            initial=checkpoint,
-            timeout_seconds=_human_click_timeout_seconds(),
-        )
-        if result.get("timed_out"):
-            print(f"    ⏭️  [W{worker_id}] No {action} click detected before timeout; skipping this posting")
-            return result
-
-        # A successful account action can immediately reveal another protected
-        # Workday account action. Keep the AI frozen until that chain is clear.
-        await asyncio.sleep(0.35)
-        checkpoint = result.get("next_checkpoint") or await probe_workday_human_checkpoint(browser)
-        if not checkpoint.get("required"):
-            print(f"    ▶️  [W{worker_id}] {action} click/page change detected; AI resuming")
-            return result
-
-    return {**checkpoint, "completed": False, "timed_out": False}
-
-
 def _otp_mailbox(email: str) -> tuple[str, str]:
     """Return the right inbox for verification emails."""
     domain = email.split("@", 1)[1].lower().strip() if "@" in email else ""
@@ -202,28 +178,26 @@ def _interest_statement(title: str, company: str) -> str:
     )
 
 
-async def _current_page(browser: BrowserSession):
-    page = await browser.get_current_page()
-    if page is None:
-        await browser.new_page("about:blank")
-        page = await browser.get_current_page()
-    if page is None:
-        raise RuntimeError("Browser did not expose a current page")
-    return page
-
-
-async def _page_url(browser: BrowserSession) -> str:
+async def _maybe_apply_via_workday_engine(
+    browser: BrowserSession,
+    facts: dict,
+    resume_path: str,
+    worker_id: int,
+) -> dict | None:
+    """Try the deterministic Workday engine; return None to fall back to the agent."""
+    current_url = await _page_url(browser)
+    if not is_workday_url(current_url):
+        return None
     try:
-        page = await _current_page(browser)
-        url = await page.evaluate("() => window.location.href")
-        if url:
-            return url
-    except Exception:
-        pass
-    try:
-        return await browser.get_current_page_url()
-    except Exception:
-        return ""
+        return await run_workday_deterministic(
+            browser,
+            facts=facts,
+            resume_path=resume_path,
+            worker_id=worker_id,
+        )
+    except WorkdayDeterministicUnavailable as exc:
+        print(f"  ⚠️  [W{worker_id}] Workday deterministic engine unavailable ({exc}); falling back to agent")
+        return None
 
 
 async def _switch_to_tab(browser: BrowserSession, target_id: str) -> None:
@@ -257,24 +231,6 @@ async def _close_other_tabs(browser: BrowserSession, worker_id: int, reason: str
     if closed:
         print(f"  🧹 [W{worker_id}] Closed {closed} stale browser tab(s) during {reason}")
     return closed
-
-
-async def _wait_for_page_settle(browser: BrowserSession, seconds: float = 1.5) -> str:
-    """Wait briefly for SPA navigation/new-tab redirects to settle."""
-    last_url = ""
-    stable = 0
-    deadline = asyncio.get_event_loop().time() + seconds
-    while asyncio.get_event_loop().time() < deadline:
-        url = await _page_url(browser)
-        if url and url == last_url:
-            stable += 1
-            if stable >= 2:
-                return url
-        else:
-            stable = 0
-            last_url = url
-        await asyncio.sleep(0.25)
-    return last_url or await _page_url(browser)
 
 
 async def _wait_for_linkedin_job_surface(browser: BrowserSession, timeout: float = 24.0) -> dict:
@@ -762,6 +718,15 @@ async def apply_to_job(
                 except Exception:
                     pass
             return "dry_failed" if dry_run else "failed"
+
+    workday_result = await _maybe_apply_via_workday_engine(browser, static_facts, resume_path, worker_id)
+    if workday_result is not None:
+        blockers = ", ".join(workday_result.get("blockers") or [])
+        if not dry_run:
+            await save_job_status(url, workday_result["status"], error=f"Manual review needed: {blockers}" if blockers else None)
+        print(f"  🧭 [W{worker_id}] Workday deterministic engine: {title} at {company} — {blockers or 'ready for review'}")
+        return workday_result["status"]
+
     preflight_notes = "; ".join(preflight.get("notes") or [])
     if preflight.get("clicked_linkedin"):
         current_url = preflight.get("current_url") or ""
@@ -1221,7 +1186,10 @@ async def apply_to_job(
             f"- If an element doesn't respond after 2-3 clicks, try a completely different method (keyboard, scrolling, different selector).\n"
             f"- Do NOT repeat the same failing action more than 3 times — switch strategies.\n"
             f"- If you've been stuck on the same form field for more than 5 steps, skip it or call done with success=false.\n"
-            f"- You have a maximum of 70 steps total. Budget your steps wisely.\n\n"
+            f"- You have a maximum of 70 steps total. Budget your steps wisely.\n"
+            f"- Work through visible fields top-to-bottom in one pass. Before acting on a field, check if it already has a "
+            f"value — if so, skip it and move to the next field below it. Never re-click or retype a field that already "
+            f"has a value, and never bounce back to an earlier field once you've moved past it.\n\n"
             f"TRACKING: Include in memory field after submission:\n"
             f'@@JOB_APPLIED: {{"title": "{title}", "company": "{company}", "location": "{job.get("location", "")}"}}\n'
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"

@@ -39,6 +39,38 @@ RESUMES_DIR = BASE_DIR / "resumes"
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
 
 
+def find_brave_browser() -> str | None:
+    """Return the installed Brave Browser executable, if present.
+
+    Automation still uses LangHire's own isolated BROWSER_PROFILE_DIR, not the
+    user's real Brave profile — this only swaps which Chromium binary renders
+    the window so it looks/feels like the user's actual browser.
+    """
+    candidates: list[Path]
+    if sys.platform == "darwin":
+        candidates = [Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")]
+    elif sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        candidates = [
+            Path(local_app) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+            Path(program_files) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+            Path(program_files_x86) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+        ]
+    else:
+        candidates = [
+            Path("/usr/bin/brave-browser"),
+            Path("/usr/bin/brave-browser-stable"),
+            Path("/opt/brave.com/brave/brave"),
+            Path("/snap/bin/brave"),
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_playwright_chromium() -> str | None:
     """Return the newest usable Playwright Chromium executable, if installed.
 
@@ -85,46 +117,18 @@ def find_playwright_chromium() -> str | None:
     return None
 
 
-def find_installed_brave() -> str | None:
-    """Return the locally installed Brave executable, if present.
-
-    The automation profile's cookies are encrypted with a Keychain key that is
-    scoped to the browser that wrote them, so switching browsers silently drops
-    every saved login. Brave is preferred because it is the browser the profile
-    was created with.
-    """
-    candidates = {
-        "darwin": (
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            str(Path.home() / "Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-        ),
-        "win32": (
-            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-        ),
-        "linux": (
-            "/usr/bin/brave-browser",
-            "/usr/bin/brave",
-            "/snap/bin/brave",
-        ),
-    }
-    for candidate in candidates.get(sys.platform, candidates["linux"]):
-        if Path(candidate).is_file():
-            return candidate
-    return None
-
-
 def resolve_browser_executable() -> str | None:
-    """Pick the browser binary used for automation.
+    """Pick the browser binary used for automation and for manual logins.
 
     ``LANGHIRE_BROWSER_PATH`` overrides everything, then an installed Brave,
-    then a Playwright-managed Chromium. Returning ``None`` leaves the choice to
-    browser-use.
+    then a Playwright-managed Chromium. Both paths must agree: the automation
+    profile can only be opened by the browser that created it, so a login saved
+    by one binary is invisible to the other.
     """
     override = (os.environ.get("LANGHIRE_BROWSER_PATH") or "").strip()
     if override and Path(override).is_file():
         return override
-    return find_installed_brave() or find_playwright_chromium()
+    return find_brave_browser() or find_playwright_chromium()
 
 
 def browser_session_kwargs() -> dict:
@@ -155,6 +159,12 @@ def browser_session_kwargs() -> dict:
         "enable_default_extensions": False,
     }
     executable = resolve_browser_executable()
+    if executable and "brave" in Path(executable).name.lower():
+        # Brave's startup overhead (Shields, Wallet, Rewards init) exceeds
+        # browser-use's fixed 30s launch timeouts; both are overridable via
+        # env var (browser_use/browser/events.py: _get_timeout).
+        os.environ.setdefault("TIMEOUT_BrowserStartEvent", "90")
+        os.environ.setdefault("TIMEOUT_BrowserLaunchEvent", "90")
     if executable:
         kwargs["executable_path"] = executable
     return kwargs
