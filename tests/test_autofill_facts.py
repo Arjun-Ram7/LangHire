@@ -209,6 +209,56 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_school_question_mentioning_country_is_not_filled_with_the_country(self):
+        # "We recruit from universities across the country" contains "country",
+        # which matched the country rule first and typed "USA" into the school
+        # field. A wrong answer is worse than a blank one.
+        result, values = self.run_fixture(
+            """
+            <div class="q"><label for="school">We recruit from universities across the country.
+              If your school isn't listed please select Other.</label>
+              <input id="school" placeholder="Start typing..." role="combobox" required></div>
+            """,
+            {**WORKDAY_FACTS, "school": "Virginia Tech", "country": "USA"},
+        )
+
+        self.assertNotEqual(values["school"], "USA", result["debugInputs"])
+
+    def test_signature_date_is_not_filled_with_a_location(self):
+        # A MM/DD/YYYY signature date matched the location rule and received
+        # "Blacksburg, Virginia".
+        result, values = self.run_fixture(
+            """
+            <div class="q"><label for="sig">Signature date</label>
+              <input id="sig" placeholder="MM/DD/YYYY" required></div>
+            """,
+            {**WORKDAY_FACTS, "current_location": "Blacksburg, Virginia", "city": "Blacksburg"},
+        )
+
+        self.assertNotIn("Blacksburg", values["sig"], result["debugInputs"])
+
+    def test_preferred_name_is_answered_with_the_first_name(self):
+        result, values = self.run_fixture(
+            """
+            <div class="q"><label for="pname">Preferred name - what would you like us to call you?</label>
+              <input id="pname" required></div>
+            """,
+            {**WORKDAY_FACTS, "first_name": "Arjun"},
+        )
+
+        self.assertEqual(values["pname"], "Arjun", result["debugInputs"])
+
+    def test_legal_address_is_answered_with_the_street_address(self):
+        result, values = self.run_fixture(
+            """
+            <div class="q"><label for="addr">Legal address:</label>
+              <input id="addr" required></div>
+            """,
+            {**WORKDAY_FACTS, "street_address": "504 Hunt Club Rd"},
+        )
+
+        self.assertEqual(values["addr"], "504 Hunt Club Rd", result["debugInputs"])
+
     def test_yes_no_f1_visa_question_is_answered_yes(self):
         # "Are you currently on an F-1 visa?" offers Yes/No, but the rule
         # returned the visa_status text ("F-1 student visa"), which is not one
