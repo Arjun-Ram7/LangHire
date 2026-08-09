@@ -51,6 +51,7 @@ try:
         _static_fill_passes,
         _summarize_review,
         _wait_for_page_settle,
+        scale_cleanup_budget,
     )
 except ImportError:
     import backend.core.shared_config as config
@@ -74,6 +75,7 @@ except ImportError:
         _static_fill_passes,
         _summarize_review,
         _wait_for_page_settle,
+        scale_cleanup_budget,
     )
 
 from cli.apply_jobs import (
@@ -167,6 +169,14 @@ async def open_for_manual_review(
         needs_cleanup = _needs_llm_cleanup(summary_before_llm) or not preflight.get("clicked_linkedin")
         can_cleanup = _can_run_llm_cleanup(summary_before_llm, preflight)
         if llm_cleanup and needs_cleanup and can_cleanup:
+            scaled_steps, scaled_timeout = scale_cleanup_budget(summary_before_llm, llm_steps, llm_timeout)
+            if scaled_steps != llm_steps:
+                print(
+                    f"  ➕ [W{worker_id}] Scaling cleanup budget for a form with "
+                    f"{int(summary_before_llm.get('required_empty') or 0)} required blank(s) + "
+                    f"{len(summary_before_llm.get('needs_llm') or [])} flagged field(s): "
+                    f"{llm_steps}→{scaled_steps} steps, {int(llm_timeout)}→{int(scaled_timeout)}s"
+                )
             cleanup = await _run_llm_cleanup(
                 browser,
                 facts=facts,
@@ -175,8 +185,8 @@ async def open_for_manual_review(
                 title=title,
                 company=company,
                 worker_id=worker_id,
-                max_steps=llm_steps,
-                timeout=llm_timeout,
+                max_steps=scaled_steps,
+                timeout=scaled_timeout,
                 cancel_flag=cancel_flag,
             )
             if cleanup.get("last_review"):
@@ -266,6 +276,12 @@ async def open_for_manual_review(
                 f"{safe_submit.get('reason') or 'blocked'}"
                 + (f" ({safe_blockers})" if safe_blockers else "")
             )
+        elif (summary.get("llm_cleanup") or {}).get("stop_reason"):
+            # The cleanup agent has the real, specific reason it stopped (e.g. a
+            # blank/broken page after it clicked Apply itself) — that's always
+            # more accurate than inferring failure from the deterministic
+            # preflight's own separate, earlier attempt to click Apply.
+            error = f"Manual review needed: {(summary['llm_cleanup'] or {}).get('stop_reason')}"
         elif not preflight.get("clicked_linkedin"):
             error = "Manual review needed: LinkedIn apply button was not clicked automatically"
         else:

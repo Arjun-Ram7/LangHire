@@ -509,6 +509,34 @@ def _autofill_script(facts: dict[str, str]) -> str:
       && !el.readOnly;
   }}
 
+  // Greenhouse (and others) wrap each custom-question <input> in its own
+  // open shadow root, with the actual visible question text rendered
+  // outside it in the light DOM. `.closest()`, `.previousElementSibling`,
+  // and `.parentElement` all stop dead at a shadow boundary by spec — they
+  // do not climb into the light DOM around the shadow host. Any label-text
+  // lookup that walks ancestors/siblings from `el` directly therefore reads
+  // almost nothing for these inputs (just id/name attributes), and every
+  // downstream keyword/fuzzy match effectively runs on garbage — which is
+  // how "How did you hear about this job?" ended up locked in as
+  // linkedin_url and "restrictive covenants" as current_employer on a real
+  // Greenhouse form. Climbing out to the shadow root's host element first
+  // (repeated for nested shadow roots) puts the traversal back in the
+  // light DOM where the real question text actually lives.
+  function escapeShadowBoundary(el) {{
+    let current = el;
+    let guard = 0;
+    while (current && guard < 8) {{
+      const root = current.getRootNode?.();
+      if (root && root.host && root !== document) {{
+        current = root.host;
+        guard += 1;
+      }} else {{
+        break;
+      }}
+    }}
+    return current || el;
+  }}
+
   function labelText(el) {{
     const pieces = [
       el.getAttribute('aria-label'),
@@ -529,14 +557,15 @@ def _autofill_script(facts: dict[str, str]) -> str:
         root.querySelectorAll(`label[for="${{CSS.escape(el.id)}}"]`).forEach((label) => pieces.push(label.innerText));
       }} catch (_) {{}}
     }}
-    const wrappingLabel = el.closest('label');
+    const host = escapeShadowBoundary(el);
+    const wrappingLabel = host.closest('label');
     if (wrappingLabel) pieces.push(wrappingLabel.innerText);
-    let sibling = el.previousElementSibling;
+    let sibling = host.previousElementSibling;
     for (let i = 0; sibling && i < 4; i += 1, sibling = sibling.previousElementSibling) {{
       const siblingText = clean(sibling.innerText || sibling.textContent || '');
       if (siblingText && siblingText.length <= 500) pieces.push(siblingText);
     }}
-    const parent = el.closest('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], li, fieldset, div');
+    const parent = host.closest('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], li, fieldset, div');
     if (parent) {{
       const parentText = clean(parent.innerText || parent.textContent || '');
       if (parentText.length <= 900) pieces.push(parentText);
@@ -569,14 +598,15 @@ def _autofill_script(facts: dict[str, str]) -> str:
         root.querySelectorAll(`label[for="${{CSS.escape(el.id)}}"]`).forEach((label) => pieces.push(label.innerText));
       }} catch (_) {{}}
     }}
-    const wrappingLabel = el.closest('label');
+    const host = escapeShadowBoundary(el);
+    const wrappingLabel = host.closest('label');
     if (wrappingLabel) pieces.push(wrappingLabel.innerText);
-    let sibling = el.previousElementSibling;
+    let sibling = host.previousElementSibling;
     for (let i = 0; sibling && i < 4; i += 1, sibling = sibling.previousElementSibling) {{
       const siblingText = clean(sibling.innerText || sibling.textContent || '');
       if (siblingText && siblingText.length <= 500) pieces.push(siblingText);
     }}
-    const parent = el.closest('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], li, fieldset, div');
+    const parent = host.closest('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], li, fieldset, div');
     if (parent) {{
       const parentText = clean(parent.innerText || parent.textContent || '');
       if (parentText.length <= 900) pieces.push(parentText);
@@ -606,7 +636,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
         root.querySelectorAll(`label[for="${{CSS.escape(el.id)}}"]`).forEach((label) => pieces.push(label.innerText));
       }} catch (_) {{}}
     }}
-    const wrappingLabel = el.closest('label');
+    const wrappingLabel = escapeShadowBoundary(el).closest('label');
     if (wrappingLabel) pieces.push(wrappingLabel.innerText);
     return [...new Set(pieces.map(norm).filter((piece) => piece.length >= 3 && piece.length <= 100))];
   }}
@@ -742,6 +772,25 @@ def _autofill_script(facts: dict[str, str]) -> str:
       || !!el.getAttribute?.('list');
   }}
 
+  // Autocomplete/react-select dropdown suggestions (role="listbox" popups,
+  // react-select-style "__option"/"__menu" classes) are handled exclusively
+  // by selectAutocompleteOption(). The generic choice-pill scanner below is
+  // for persistent radio/checkbox-style pill UIs and must never also touch
+  // these transient suggestion items — its own group-text lookup falls back
+  // to matching keywords anywhere in the page body, so without this guard it
+  // will "steal" and click a live autocomplete option whenever the page
+  // happens to mention a matching keyword (e.g. "race") anywhere else, racing
+  // against and overriding whatever selectAutocompleteOption already picked.
+  function isInsideAutocompletePopup(el) {{
+    return !!el.closest?.(
+      '[role="listbox"], [role="option"], .select__menu, .select__option, ' +
+      '[class*="menu-list"], [class*="MenuList"], [class*="__menu"], [class*="__option"], ' +
+      '.autocomplete-option, .pac-item, .location-results, ' +
+      '[data-automation-id*="promptOption"], [data-automation-id*="menuItem"], [data-automation-id*="selectOption"], ' +
+      '[data-automation-id="activeListContainer"]'
+    );
+  }}
+
   function lock(el, value, field) {{
     const sig = signature(el);
     window.__STATIC_AUTOFILL_LOCKS[sig] = {{ value, field }};
@@ -856,7 +905,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
       || classText.includes('select')
       || classText.includes('autocomplete')
       || el.getAttribute('list');
-    const dropdownFacts = ['city', 'state', 'country', 'current_location', 'preferred_us_locations', 'school', 'degree', 'major', 'heard_about', 'authorized_to_work_us', 'visa_sponsorship_needed'];
+    const dropdownFacts = ['city', 'state', 'country', 'current_location', 'preferred_us_locations', 'school', 'degree', 'major', 'heard_about', 'authorized_to_work_us', 'visa_sponsorship_needed', 'gender', 'race_ethnicity', 'education_end_month', 'education_start_month', 'graduation_year', 'veteran_status', 'disability_status', 'hispanic_latino'];
     if (field === 'preferred_us_locations' && !/^wherever\\b/i.test(value)) return true;
     if ((field === 'current_location' || field === 'preferred_us_locations') && hasAny(text, ['location'])) return true;
     return fieldLooksDropdown && dropdownFacts.includes(field)
@@ -892,6 +941,33 @@ def _autofill_script(facts: dict[str, str]) -> str:
     return [String(index), String(index).padStart(2, '0'), names[index], names[index].slice(0, 3)];
   }}
 
+  function endMonthName(value) {{
+    const raw = clean(value || '');
+    if (!raw) return '';
+    const monthNames = [
+      'january', 'february', 'march', 'april', 'may', 'june',
+      'july', 'august', 'september', 'october', 'november', 'december'
+    ];
+    const lower = norm(raw);
+    const named = monthNames.find((name) => lower.includes(name) || lower.includes(name.slice(0, 3)));
+    if (named) return named.charAt(0).toUpperCase() + named.slice(1);
+    const numeric = raw.match(/\\b(0?[1-9]|1[0-2])[\\/\\-]/) || raw.match(/^(0?[1-9]|1[0-2])$/);
+    if (numeric) {{
+      const idx = Number(numeric[1]);
+      if (idx >= 1 && idx <= 12) return monthNames[idx - 1].charAt(0).toUpperCase() + monthNames[idx - 1].slice(1);
+    }}
+    const isoNumeric = raw.match(/\\d{{4}}-(0[1-9]|1[0-2])\\b/);
+    if (isoNumeric) {{
+      const idx = Number(isoNumeric[1]);
+      return monthNames[idx - 1].charAt(0).toUpperCase() + monthNames[idx - 1].slice(1);
+    }}
+    if (lower.includes('spring')) return 'May';
+    if (lower.includes('summer')) return 'August';
+    if (lower.includes('fall') || lower.includes('autumn')) return 'December';
+    if (lower.includes('winter')) return 'December';
+    return '';
+  }}
+
   function autocompleteTerms(field, value) {{
     const terms = [clean(value)].filter(Boolean);
     if (field === 'city' && facts.city) {{
@@ -914,6 +990,37 @@ def _autofill_script(facts: dict[str, str]) -> str:
     }}
     if (field === 'country') terms.push('United States', 'USA', 'US');
     if (field === 'heard_about') terms.push(facts.heard_about || 'LinkedIn', 'LinkedIn');
+    if (field === 'gender') {{
+      const g = norm(value);
+      if (has(g, ['male']) && !has(g, ['female'])) terms.push('male', 'man', 'm');
+      else if (has(g, ['female'])) terms.push('female', 'woman', 'w', 'f');
+      else if (has(g, ['non-binary', 'nonbinary', 'non binary'])) terms.push('non-binary', 'nonbinary', 'genderqueer', 'genderfluid', 'agender', 'gender non-conforming', 'gender nonconforming');
+      else if (has(g, ['transgender', 'trans '])) terms.push('transgender', 'trans');
+      else if (has(g, ['two-spirit', 'two spirit'])) terms.push('two-spirit', 'two spirit');
+      else if (has(g, ['prefer not', 'decline', 'not to say'])) terms.push('prefer not to say', 'decline to self identify', 'decline to answer', 'i prefer not to answer', 'prefer not to disclose');
+    }}
+    if (field === 'race_ethnicity') {{
+      const r = norm(value);
+      if (has(r, ['asian indian', 'indian'])) terms.push('asian', 'asian indian', 'south asian', 'asian (not hispanic or latino)', 'east asian');
+      else if (has(r, ['asian'])) terms.push('asian', 'asian (not hispanic or latino)', 'east asian', 'south asian');
+      if (has(r, ['white', 'caucasian'])) terms.push('white', 'white (not hispanic or latino)', 'caucasian');
+      if (has(r, ['black', 'african american'])) terms.push('black', 'black or african american', 'african american', 'black (not hispanic or latino)');
+      if (has(r, ['hispanic', 'latino', 'latina', 'latinx'])) terms.push('hispanic', 'hispanic or latino', 'latino', 'latina', 'latinx', 'hispanic/latino');
+      if (has(r, ['native american', 'american indian', 'alaska native'])) terms.push('american indian or alaska native', 'native american', 'indigenous');
+      if (has(r, ['pacific islander', 'native hawaiian'])) terms.push('native hawaiian or other pacific islander', 'pacific islander');
+      if (has(r, ['middle eastern', 'north african'])) terms.push('middle eastern or north african', 'middle eastern', 'mena');
+      if (has(r, ['two or more', 'mixed', 'multiracial', 'biracial'])) terms.push('two or more races', 'mixed race', 'multiracial', 'biracial', 'two or more races (not hispanic or latino)');
+      if (has(r, ['prefer not', 'decline', 'not to say'])) terms.push('prefer not to say', 'decline to self identify', 'decline to answer', 'i do not wish to answer');
+    }}
+    if (field === 'education_end_month' || field === 'education_start_month') {{
+      const m = norm(value);
+      if (m) {{
+        terms.push(m, m.slice(0, 3));
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+        const idx = monthNames.indexOf(m);
+        if (idx >= 0) terms.push(String(idx + 1), String(idx + 1).padStart(2, '0'));
+      }}
+    }}
     return [...new Set(terms.map(norm).filter(Boolean))];
   }}
 
@@ -983,11 +1090,32 @@ def _autofill_script(facts: dict[str, str]) -> str:
         loose = exact || options.find((item) => terms.some((term) => item.text.includes(term) || term.includes(item.text)));
       }}
     }}
-    if (loose && clickLikeHuman(loose.el)) {{
+    // heard_about is the sole exception: Workday's "How did you hear about
+    // us" needs a second setNativeValue()+search pass on this same input, so
+    // it must stay interactive after the first match. Every other resolved
+    // combobox gets hard-disabled — a weak vision model reading a page full
+    // of legalese (e.g. the veteran-status radio block) will not reliably
+    // notice a data-staticAutocompleteSelected hint and will keep re-clicking
+    // an already-correct answer; pointer-events:none plus the aria/tabindex
+    // changes below drop it out of browser_use's own interactive-element
+    // index, so there is nothing left for the agent to click at all.
+    const finalizeSelection = () => {{
       el.dataset.staticAutocompleteSelected = field;
       result.selects += 1;
+      if (field !== 'heard_about') {{
+        // Not setting `disabled` here: a disabled form control is dropped
+        // from FormData entirely, which would silently strip this answer
+        // from the real submission. pointer-events:none + aria-disabled +
+        // tabindex block further interaction without touching that.
+        try {{
+          el.style.pointerEvents = 'none';
+          el.setAttribute('aria-disabled', 'true');
+          el.setAttribute('tabindex', '-1');
+        }} catch (_) {{}}
+      }}
       return true;
-    }}
+    }};
+    if (loose && clickLikeHuman(loose.el)) return finalizeSelection();
 
     dispatchKey(el, 'ArrowDown');
     await sleep(100);
@@ -995,11 +1123,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (activeId) {{
       const root = el.getRootNode?.() || document;
       const active = root.getElementById?.(activeId) || document.getElementById(activeId);
-      if (active && clickLikeHuman(active)) {{
-        el.dataset.staticAutocompleteSelected = field;
-        result.selects += 1;
-        return true;
-      }}
+      if (active && clickLikeHuman(active)) return finalizeSelection();
     }}
     // Exact/loose text matching is brittle for city and school names (format
     // and spelling variants abound). For these fields, a visible suggestion
@@ -1007,11 +1131,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     // reasonable pick rather than leaving the field blank for the LLM.
     if (['current_location', 'preferred_us_locations', 'school'].includes(field) && options.length) {{
       const first = options[0];
-      if (clickLikeHuman(first.el)) {{
-        el.dataset.staticAutocompleteSelected = field;
-        result.selects += 1;
-        return true;
-      }}
+      if (clickLikeHuman(first.el)) return finalizeSelection();
     }}
     dispatchKey(el, 'Enter');
     return false;
@@ -1060,6 +1180,23 @@ def _autofill_script(facts: dict[str, str]) -> str:
       const endYear = facts.graduation_year || clean(facts.education_end_date || facts.graduation || '').match(/\\b(?:19|20)\\d{{2}}\\b/)?.[0];
       return ['graduation_year', endYear];
     }}
+    // idAndName is built from norm(), which replaces every non-alphanumeric
+    // character (hyphens, underscores) with a space — so "end-month--0"
+    // becomes "end month 0" here, never the literal "end-month".
+    if (has(idAndName, ['end month', 'endmonth']) && !has(idAndName, ['start'])) {{
+      return ['education_end_month', endMonthName(facts.education_end_date || facts.graduation)];
+    }}
+    if (has(idAndName, ['start month', 'startmonth'])) {{
+      return ['education_start_month', endMonthName(facts.education_start_date || facts.school_start_date)];
+    }}
+    if (has(idAndName, ['end year', 'endyear']) && !has(idAndName, ['start'])) {{
+      const endYear = facts.graduation_year || clean(facts.education_end_date || facts.graduation || '').match(/\\b(?:19|20)\\d{{2}}\\b/)?.[0];
+      return ['graduation_year', endYear];
+    }}
+    if (has(idAndName, ['start year', 'startyear'])) {{
+      const startYear = clean(facts.education_start_date || facts.school_start_date || '').match(/\\b(?:19|20)\\d{{2}}\\b/)?.[0];
+      return ['education_start_date', startYear];
+    }}
     if (type === 'email' || has(text, ['email', 'e mail', 'username', 'user name', 'user id', 'userid', 'login id'])) {{
       const loginish = has(text + ' ' + page, ['login', 'sign in', 'signup', 'sign up', 'register', 'create account', 'password']);
       if (loginish && createAccountSurface) return [null, null];
@@ -1085,6 +1222,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (has(text, ['github'])) return ['github_url', facts.github_url];
     if (has(text, ['portfolio', 'website', 'personal site'])) return ['portfolio_url', facts.portfolio_url];
     if (has(text, ['pronoun'])) return ['pronouns', facts.pronouns];
+    if (has(text, ['gender identity', 'gender']) && !has(text, ['engender'])) return ['gender', facts.gender];
+    if (has(text, ['race', 'ethnicity', 'racial'])) return ['race_ethnicity', facts.race_ethnicity];
     if (has(text, ['date of birth', 'birth date', 'dob'])) return ['date_of_birth', facts.date_of_birth];
     if (has(text, ['gpa', 'grade point'])) return ['gpa', facts.gpa];
     if (has(text, ['age']) && !has(text, ['page', 'stage', 'grade average'])) return ['age', facts.age];
@@ -1133,9 +1272,60 @@ def _autofill_script(facts: dict[str, str]) -> str:
     return pickFuzzyTextFact(el);
   }}
 
+  // Common nickname -> official-name mappings for schools with well-known
+  // short names. Checked with priority for the 'school' field before any
+  // generic substring/fuzzy matching, because a naive fuzzy match on a
+  // common word (e.g. "Virginia") in a 3000+ option world-university list
+  // can land on a *different, unrelated* school with the same word in its
+  // name (a real, live failure: "Virginia Tech" fuzzy-matched to "Virginia
+  // Commonwealth University" instead of "Virginia Polytechnic Institute and
+  // State University") — actively wrong data is worse than leaving it blank
+  // for manual review, so this map trades broad coverage for precision.
+  const SCHOOL_ALIASES = {{
+    'virginia tech': 'virginia polytechnic institute and state university',
+    'georgia tech': 'georgia institute of technology',
+    'cal poly': 'california polytechnic state university',
+    'cal poly slo': 'california polytechnic state university',
+    'mit': 'massachusetts institute of technology',
+    'caltech': 'california institute of technology',
+    'ut austin': 'university of texas at austin',
+    'ohio state': 'the ohio state university',
+    'penn state': 'pennsylvania state university',
+    'psu': 'pennsylvania state university',
+    'umass': 'university of massachusetts amherst',
+    'umass amherst': 'university of massachusetts amherst',
+    'unc': 'university of north carolina at chapel hill',
+    'unc chapel hill': 'university of north carolina at chapel hill',
+    'nc state': 'north carolina state university',
+    'texas a&m': 'texas a&m university',
+    'texas am': 'texas a&m university',
+    'ucla': 'university of california los angeles',
+    'ucla los angeles': 'university of california los angeles',
+    'uc berkeley': 'university of california berkeley',
+    'berkeley': 'university of california berkeley',
+    'uva': 'university of virginia',
+    'gt': 'georgia institute of technology',
+    'rpi': 'rensselaer polytechnic institute',
+    'rit': 'rochester institute of technology',
+    'nyu': 'new york university',
+    'usc': 'university of southern california',
+    'asu': 'arizona state university',
+    'osu': 'the ohio state university',
+    'lsu': 'louisiana state university',
+    'ole miss': 'university of mississippi',
+    'vcu': 'virginia commonwealth university',
+    'jmu': 'james madison university',
+    'odu': 'old dominion university',
+    'gmu': 'george mason university',
+  }};
+
   function optionValueFor(select, field, value) {{
     if (!value) return null;
     const targets = [norm(value)];
+    if (field === 'school') {{
+      const alias = SCHOOL_ALIASES[norm(value)];
+      if (alias) targets.unshift(alias);
+    }}
     if (field === 'state') {{
       const abbr = stateAbbrev(value);
       if (abbr) targets.push(norm(abbr));
@@ -1421,6 +1611,13 @@ def _autofill_script(facts: dict[str, str]) -> str:
     else if (has(text, ['degree'])) [field, value] = ['degree', optionValueFor(select, 'degree', facts.degree) || optionValueFor(select, 'degree', 'bachelor')];
     else if (has(text, ['education start', 'school start', 'started school']) || (has(text, ['start date']) && has(text, ['school', 'university', 'college', 'education']))) [field, value] = ['education_start_date', optionValueFor(select, 'education_start_date', facts.education_start_date || facts.school_start_date)];
     else if (has(text, ['education end', 'school end']) || (has(text, ['end date', 'completion date']) && has(text, ['school', 'university', 'college', 'education']))) [field, value] = ['education_end_date', optionValueFor(select, 'education_end_date', facts.education_end_date || facts.graduation)];
+    // The school NAME itself, as a native <select> (e.g. a world-university
+    // list) — this was missing entirely; only the start/end-date variants
+    // above were handled, so a plain "University" dropdown fell through to
+    // no field match at all and the LLM was left to guess (a real live
+    // failure landed on the wrong, unrelated "Virginia Commonwealth
+    // University" instead of "Virginia Tech"'s real entry).
+    else if (has(text, ['university', 'college', 'school']) && !has(text, ['start', 'end', 'graduat'])) [field, value] = ['school', optionValueFor(select, 'school', facts.school)];
     else if (has(text, ['graduation', 'graduate'])) [field, value] = ['graduation', optionValueFor(select, 'graduation', facts.graduation_term || facts.graduation)];
     else if (has(text, ['authorized', 'authorization', 'eligible to work', 'work in the united states'])) [field, value] = ['authorized_to_work_us', yesNoValue(select, factBool('authorized_to_work_us'))];
     else if (has(text, ['sponsor', 'sponsorship', 'visa'])) [field, value] = ['visa_sponsorship_needed', yesNoValue(select, factBool('visa_sponsorship_needed'))];
@@ -1476,6 +1673,18 @@ def _autofill_script(facts: dict[str, str]) -> str:
     labels.forEach((label) => {{ label.dataset.staticChoiceLocked = 'true'; }});
     if (lockKey) window.__STATIC_CHOICE_LOCKS[lockKey] = true;
     result.choices += 1;
+    // A native radio/checkbox reliably shows its own checked state, but a
+    // vision model reading a long, legalese-heavy question block (veteran
+    // status, disability) can still miss that and re-click an already-locked
+    // answer. pointer-events:none blocks further clicks and drops it from
+    // browser_use's interactive-element index — deliberately NOT setting
+    // `disabled`, which would exclude this control's value from the actual
+    // form submission (browsers omit disabled fields from FormData).
+    try {{
+      input.style.pointerEvents = 'none';
+      input.setAttribute('aria-disabled', 'true');
+      input.setAttribute('tabindex', '-1');
+    }} catch (_) {{}}
     return true;
   }}
 
@@ -1524,12 +1733,22 @@ def _autofill_script(facts: dict[str, str]) -> str:
     control.dataset.staticChoiceLocked = 'true';
     if (lockKey) window.__STATIC_CHOICE_LOCKS[lockKey] = true;
     result.choices += 1;
+    // Same reasoning as setChoice()/finalizeSelection() above: block further
+    // interaction so a vision model can't re-click an already-correct custom
+    // choice pill, without using `disabled` (this control itself isn't a
+    // named form field — it's a clickable proxy for one — but leave its
+    // value-carrying behavior alone on the off chance it is).
+    try {{
+      control.style.pointerEvents = 'none';
+      control.setAttribute('aria-disabled', 'true');
+      control.setAttribute('tabindex', '-1');
+    }} catch (_) {{}}
     return true;
   }}
 
   function ancestorTexts(control, limit = 10) {{
     const texts = [];
-    let node = control;
+    let node = escapeShadowBoundary(control);
     for (let depth = 0; node && depth < limit; depth += 1, node = node.parentElement) {{
       const text = clean(node.innerText || node.textContent || '');
       if (text && text.length <= 1800) texts.push({{ node, text, normText: norm(text) }});
@@ -1538,7 +1757,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function closestQuestionText(control) {{
-    const explicit = control.closest?.('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], fieldset');
+    const host = escapeShadowBoundary(control);
+    const explicit = host.closest?.('[data-testid], [data-qa], .form-group, .field, [class*="field"], [class*="Field"], .application-question, [class*="question"], [class*="Question"], [role="group"], fieldset');
     const explicitText = clean(explicit?.innerText || explicit?.textContent || '');
     if (explicitText && explicitText.length <= 1800) return norm(explicitText);
 
@@ -1561,9 +1781,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function optionLabelText(control) {{
-    const label = control.closest?.('label');
+    const host = escapeShadowBoundary(control);
+    const label = host.closest?.('label');
     if (label) return norm(label.innerText || label.textContent || '');
-    const parent = control.parentElement;
+    const parent = host.parentElement;
     const parentText = clean(parent?.innerText || parent?.textContent || '');
     if (parentText && parentText.length <= 220) return norm(parentText);
     return norm([
@@ -1600,7 +1821,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
       'data privacy', 'terms and conditions', 'accept terms'
     ])) return null;
 
-    const preferred = control.closest?.(
+    const choiceHost = escapeShadowBoundary(control);
+    const preferred = choiceHost.closest?.(
       'label, button, [role="radio"], [role="checkbox"], [aria-checked], ' +
       '[data-automation-id*="radio"], [data-automation-id*="checkbox"], ' +
       '[data-testid*="radio"], [data-testid*="checkbox"], [data-testid*="option"], ' +
@@ -1610,7 +1832,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (preferred && visible(preferred)) return preferred;
 
     let best = visible(control) ? control : null;
-    let node = control.parentElement;
+    let node = choiceHost.parentElement;
     for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {{
       const text = clean(node.innerText || node.textContent || '');
       const nodeNorm = norm(text);
@@ -1925,6 +2147,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
   for (const control of allElements('[role="checkbox"], [role="radio"], [aria-checked], span[checkbox-state], div[checkbox-state], button[aria-checked]')) {{
     if (!visible(control)) continue;
     if (control.matches?.('input[type="radio"], input[type="checkbox"]')) continue;
+    if (isInsideAutocompletePopup(control)) continue;
     const groupText = closestQuestionText(control);
     const optionText = optionLabelText(control);
     const matchedField = customFieldMatch(optionText, groupText);
@@ -1945,6 +2168,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
   for (const control of allElements(genericChoiceSelector)) {{
     if (!visible(control)) continue;
     if (control.matches?.('input, textarea, select, a')) continue;
+    if (isInsideAutocompletePopup(control)) continue;
     const target = customChoiceTarget(control);
     if (!target || clickedGenericTargets.has(target)) continue;
     if (target.dataset.staticChoiceLocked === 'true' || target.closest?.('[data-static-choice-locked="true"]')) continue;
@@ -2727,7 +2951,21 @@ def _safe_progress_step_script() -> str:
   ]);
   result.applicationish = /\/apply\b|application|candidateexperience|ashbyhq|greenhouse|lever|workday|oraclecloud|smartrecruiters|jobvite|icims|successfactors/i.test(location.href)
     || hasAny(page, ['upload resume', 'resume/cv', 'cover letter', 'voluntary self-identification', 'work authorization', 'sponsorship']);
-  const jobPostingish = hasAny(page, ['job requisition id', 'posted on', 'job details', 'time type'])
+  // This guard exists to stop us clicking "Apply" on a generic job-board
+  // *listing* page before the right job has even been confirmed. It should
+  // not also block the correct first Apply click on a Workday job-detail
+  // page — this function is only ever called from inside a flow already
+  // targeting one specific job (never a generic search crawl), and a
+  // Workday job page showing this exact boilerplate (Job Requisition ID,
+  // Time Type, sometimes an embedded recruiting video and a long marketing
+  // description) before the real form loads is a normal, common shape, not
+  // a listing page. Real observed failure: a Workday posting with a video
+  // player and heavy marketing copy above the Apply button left the agent
+  // waiting/scrolling for 9 steps because this exact check treated it as
+  // "still just a posting" and refused the click that would have unstuck it.
+  const isWorkdayHost = /myworkdayjobs\.com|myworkdaysite\.com/i.test(url);
+  const jobPostingish = !isWorkdayHost
+    && hasAny(page, ['job requisition id', 'posted on', 'job details', 'time type'])
     && !/\/apply\b|candidateexperience/i.test(location.href);
 
   const isFinalApplicationLabel = (label) => {
