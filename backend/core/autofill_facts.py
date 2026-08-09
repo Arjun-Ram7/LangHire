@@ -1197,6 +1197,18 @@ def _autofill_script(facts: dict[str, str]) -> str:
     }};
     if (loose && clickLikeHuman(loose.el)) return finalizeSelection();
 
+    // Taking whatever the widget happens to highlight is only safe where the
+    // suggestion list is a search result for text we typed and the exact
+    // spelling is unknowable (a city, a school). Everywhere else the highlight
+    // is just the first item in a fixed list, and committing it invents an
+    // answer: this is how a Virginia Tech candidate ended up with "Aalborg
+    // University". For other fields, leaving the field for the human is right.
+    const FIRST_SUGGESTION_FIELDS = ['current_location', 'preferred_us_locations', 'school'];
+    if (!FIRST_SUGGESTION_FIELDS.includes(field)) {{
+      dispatchKey(el, 'Enter');
+      return false;
+    }}
+
     dispatchKey(el, 'ArrowDown');
     await sleep(100);
     const activeId = el.getAttribute('aria-activedescendant');
