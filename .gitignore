@@ -71,3 +71,6 @@ src-tauri/binaries/
 *.msi
 *.deb
 *.rpm
+
+# ── Claude Code (local settings + worktrees) ──────────────────────────────
+.claude/
