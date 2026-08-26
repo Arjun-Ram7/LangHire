@@ -85,6 +85,26 @@ _NO_SPONSORSHIP_PATTERNS = [
     r"\brequires? unrestricted work authorization\b",
 ]
 
+_US_CITIZEN_ONLY_PATTERNS = [
+    r"\bmust be a (?:u\.?s\.?|united states) citizen\b",
+    r"\b(?:u\.?s\.?|united states) citizenship is required\b",
+    r"\bcitizenship required\b",
+    r"\bcitizens? only\b",
+    r"\bmust be a u\.?s\.? person\b",
+]
+
+_CLEARANCE_REQUIRED_PATTERNS = [
+    r"\bactive\b.{0,20}\b(?:secret|top secret|ts/sci|security) clearance\b",
+    r"\b(?:able|ability|eligib\w*|willingness)\b.{0,40}\bobtain\b.{0,20}\bsecurity clearance\b",
+    r"\bsecurity clearances?\s+(?:may only|are only)\b.{0,10}granted to\b",
+    r"\bclearance\b.{0,40}(?:to include|including)\s+u\.?s\.?\s*citizenship\b",
+]
+
+_NO_OPT_CPT_PATTERNS = [
+    r"\b(?:cannot|can't|unable to|will not|won't) (?:sponsor|support|accommodate).{0,20}\b(?:opt|cpt)\b",
+    r"\bno (?:opt|cpt) (?:sponsorship|support)\b",
+]
+
 
 def _has_location_hint(text: str, hint: str) -> bool:
     """Match location hints as words/phrases, not arbitrary substrings."""
@@ -168,6 +188,15 @@ def _matches_authorization_constraints(text: str, profile: dict) -> tuple[bool, 
         return True, ""
 
     text_l = (text or "").lower()
+    for pattern in _US_CITIZEN_ONLY_PATTERNS:
+        if re.search(pattern, text_l):
+            return False, "Filtered out: requires U.S. citizenship"
+    for pattern in _CLEARANCE_REQUIRED_PATTERNS:
+        if re.search(pattern, text_l):
+            return False, "Filtered out: requires security clearance"
+    for pattern in _NO_OPT_CPT_PATTERNS:
+        if re.search(pattern, text_l):
+            return False, "Filtered out: posting rejects OPT/CPT"
     for pattern in _NO_SPONSORSHIP_PATTERNS:
         if re.search(pattern, text_l):
             return False, "Filtered out: posting says no visa sponsorship"
@@ -625,11 +654,32 @@ async def fetch_description_for_job(url: str, job: dict) -> str:
             print(f"    ⚠️  Browser cleanup error: {close_err}")
 
 
-async def collect_descriptions(jobs: dict):
-    """Phase 2: Fetch descriptions for all jobs that don't have one yet."""
+# Card-scraped descriptions are often just LinkedIn's short metadata line
+# ("Phoenix, AZ · 41 minutes ago · ..."), not the actual posting — anything
+# under this length still needs a real fetch.
+_MIN_REAL_DESCRIPTION_LENGTH = 200
+
+
+def _apply_fetched_description(url: str, job: dict, description: str, profile: dict) -> None:
+    """Save a freshly fetched description, or block the job if the real text now fails constraints."""
+    if not description:
+        return
+    text_for_filters = " ".join(
+        str(job.get(k, "")) for k in ("title", "company", "location")
+    ) + " " + description
+    ok_auth, reason = _matches_authorization_constraints(text_for_filters, profile)
+    if not ok_auth:
+        update_job(url, status="blocked", error=reason)
+        return
+    update_job(url, description=description)
+
+
+async def collect_descriptions(jobs: dict, profile: dict):
+    """Phase 2: Fetch real descriptions for jobs that only have a short card-scraped stub."""
     needs_desc = [
         (url, j) for url, j in jobs.items()
-        if j.get("status") == "pending" and not j.get("description")
+        if j.get("status") == "pending"
+        and len(j.get("description") or "") < _MIN_REAL_DESCRIPTION_LENGTH
     ]
 
     if not needs_desc:
@@ -647,7 +697,7 @@ async def collect_descriptions(jobs: dict):
             try:
                 description = await asyncio.wait_for(fetch_description_for_job(url, job), timeout=30)
                 if description:
-                    update_job(url, description=description)
+                    _apply_fetched_description(url, job, description, profile)
                     print(f"    ✅ Got description ({len(description)} chars)")
                 else:
                     print(f"    ⚠️  No description extracted")
@@ -727,7 +777,7 @@ async def main():
         if collected_urls_this_run:
             jobs = {url: job for url, job in jobs.items() if url in collected_urls_this_run}
         cred_task2 = asyncio.create_task(credential_refresh_loop(14))
-        await collect_descriptions(jobs)
+        await collect_descriptions(jobs, profile)
         cred_task2.cancel()
         jobs = load_jobs()  # reload after descriptions
 
