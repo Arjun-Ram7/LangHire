@@ -852,8 +852,9 @@ async def start_collection(body: CollectRequest):
                     await asyncio.sleep(0.3)
 
             if not _collection_status.get("cancel_requested") and collected_urls_this_run:
-                print("\n📋 Skipping separate description backfill; descriptions are captured during LinkedIn card collection.")
-                print("   This avoids opening extra browser tabs after the fast collection pass.")
+                jobs = read_jobs()
+                subset = {u: jobs[u] for u in collected_urls_this_run if u in jobs}
+                await collect_jobs.collect_descriptions(subset, profile)
         finally:
             cred_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
