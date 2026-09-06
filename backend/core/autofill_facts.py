@@ -618,7 +618,19 @@ def _autofill_script(facts: dict[str, str]) -> str:
       const own = clean(container.innerText || '');
       const field = host.closest('[class*="field"], [class*="Field"], [class*="input"], [class*="Input"]');
       const fieldText = field && field !== container ? clean(field.innerText || '') : '';
-      candidates.push(fieldText && own.startsWith(fieldText) === false ? own.replace(fieldText, ' ') : own);
+      let containerText = fieldText && own.startsWith(fieldText) === false ? own.replace(fieldText, ' ') : own;
+      // A button's own visible text (e.g. Workday's "Select One" trigger
+      // label) is never part of the question, but it does sit inside the
+      // question container's innerText -- without stripping it, "Highest
+      // level of education?" banked to Q&A as "Highest level of education?
+      // Select One". Selects are excluded: their .textContent concatenates
+      // every <option>, which could strip real label words that happen to
+      // overlap with an option's text.
+      if (host.tagName === 'BUTTON') {{
+        const ownButtonText = clean(host.innerText || host.textContent || '');
+        if (ownButtonText) containerText = clean(containerText.replace(ownButtonText, ' '));
+      }}
+      candidates.push(containerText);
     }}
     if (el.id) {{
       const root = el.getRootNode?.() || document;
@@ -925,13 +937,24 @@ def _autofill_script(facts: dict[str, str]) -> str:
     const sig = signature(el);
     window.__STATIC_AUTOFILL_LOCKS[sig] = {{ value, field }};
     el.dataset.staticAutofilled = field;
-    // Locked plain text fields are correct; making them read-only stops the
-    // LLM agent from wasting steps re-typing a value that is already right.
+    // Locked plain text fields are correct; dropping them from the agent's
+    // own interactive-element index stops it wasting steps re-typing an
+    // already-right value. readOnly alone does not do that -- a live run
+    // left "First Name" readOnly but still offered to the agent at a
+    // stable index, which retried it to failure seven times before the
+    // loop boundary gave up on the whole job. pointer-events:none +
+    // aria-disabled + tabindex=-1 is the pattern used elsewhere in this
+    // file for exactly this reason; never `disabled`, which drops the
+    // value from the real FormData submission.
     // Combobox-style widgets are excluded: some (e.g. Workday's "How did you
     // hear about us") need a second setNativeValue()+search pass on the same
-    // input to resolve a nested suggestion list, which read-only would block.
+    // input to resolve a nested suggestion list, which this lock would block.
     if (!looksLikeComboboxWidget(el)) {{
-      try {{ if ('readOnly' in el) el.readOnly = true; }} catch (_) {{}}
+      try {{
+        el.style.pointerEvents = 'none';
+        el.setAttribute('aria-disabled', 'true');
+        el.setAttribute('tabindex', '-1');
+      }} catch (_) {{}}
     }}
     result.locked += 1;
   }}
@@ -1947,14 +1970,47 @@ def _autofill_script(facts: dict[str, str]) -> str:
       pushLimited(result.matches, `${{field}} | rule | 1.00 | ${{fieldSummary(select)}}`, 24);
       setSelect(select, value, field);
     }}
-    if (isRequiredControl(select, text) && isEffectivelyEmpty(select)) {{
-      result.requiredEmpty += 1;
-      markRequiredEmpty(select, 'required-select-empty');
+    if (isEffectivelyEmpty(select)) {{
+      if (isRequiredControl(select, text)) {{
+        result.requiredEmpty += 1;
+        markRequiredEmpty(select, 'required-select-empty');
+      }} else {{
+        markNeedsLlm(select, 'optional-select-empty');
+      }}
     }}
     if (select.getAttribute('aria-invalid') === 'true') {{
       result.invalidFields += 1;
       select.dataset.hybridInvalidField = 'true';
       pushLimited(result.visibleErrors, `Invalid select: ${{fieldSummary(select)}}`);
+    }}
+  }}
+
+  // Workday renders some dropdowns as a <button aria-label="Select One
+  // Required" ...> that opens a popup listbox on click, not a native
+  // <select> or input[role=combobox] -- neither of which this scan visits.
+  // A live run had exactly this markup for "Highest level of education?":
+  // it sat blank with a visible validation error the whole run, invisible
+  // to requiredEmpty/openQuestions/needsLlm because nothing ever looked at
+  // <button> elements. This does not attempt to answer it -- the LLM
+  // cleanup agent already does, and correctly resolving a Workday popup
+  // listbox from here is out of scope -- it only makes sure a still-blank
+  // one gets recorded so it reaches Q&A instead of vanishing silently.
+  for (const trigger of allElements('button')) {{
+    if (isAbandoned(trigger) || !visible(trigger)) continue;
+    const buttonText = norm(trigger.innerText || trigger.textContent || '');
+    const ariaLabel = norm(trigger.getAttribute('aria-label') || '');
+    if (buttonText !== 'select one' && !ariaLabel.startsWith('select one')) continue;
+    const text = labelText(trigger);
+    if (isRequiredControl(trigger, text)) {{
+      result.requiredEmpty += 1;
+      markRequiredEmpty(trigger, 'required-workday-select-button-empty');
+    }} else {{
+      markNeedsLlm(trigger, 'optional-workday-select-button-empty');
+    }}
+    if (trigger.getAttribute('aria-invalid') === 'true') {{
+      result.invalidFields += 1;
+      trigger.dataset.hybridInvalidField = 'true';
+      pushLimited(result.visibleErrors, `Invalid select: ${{fieldSummary(trigger)}}`);
     }}
   }}
 
@@ -2011,7 +2067,20 @@ def _autofill_script(facts: dict[str, str]) -> str:
     const isMaleWord = (text) => /\\bmale\\b|\\bman\\b|\\bmen\\b/.test(text) && !isFemaleWord(text);
     if (isMaleWord(factText) && isFemaleWord(valueText)) return false;
     if (isFemaleWord(factText) && isMaleWord(valueText)) return false;
-    if (valueText === factText || valueText.includes(factText) || factText.includes(valueText)) return true;
+    if (valueText === factText) return true;
+    // "no" is a substring of "not", so a plain includes() matched "I do NOt
+    // want to answer" for a candidate whose fact is "No" -- the opposite of
+    // a real answer. Short tokens (yes/no/he and similar) require a whole-
+    // word match; longer phrases keep the existing substring comparison.
+    const wordBoundaryIncludes = (haystack, needle) => new RegExp(`\\b${{needle.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&')}}\\b`).test(haystack);
+    const SHORT_TOKEN_LENGTH = 3;
+    if (factText.length <= SHORT_TOKEN_LENGTH) {{
+      if (wordBoundaryIncludes(valueText, factText)) return true;
+    }} else if (valueText.length <= SHORT_TOKEN_LENGTH) {{
+      if (wordBoundaryIncludes(factText, valueText)) return true;
+    }} else if (valueText.includes(factText) || factText.includes(valueText)) {{
+      return true;
+    }}
     if (isMaleWord(factText) && isMaleWord(valueText)) return true;
     if (isFemaleWord(factText) && isFemaleWord(valueText)) return true;
     if (factText.includes('he') && valueText.includes('he') && valueText.includes('him')) return true;
@@ -2041,7 +2110,20 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (lockKey && window.__STATIC_CHOICE_LOCKS[lockKey]) return false;
     window.__STATIC_CHOICE_CLICK_GUARD.bypass = true;
     try {{
-      clickLikeHuman(control);
+      // A live run left this marked autofilled/locked, but the underlying
+      // native checkbox still reported aria-checked="false" -- the click
+      // had landed on a wrapper/label proxy that never toggled the real
+      // input Workday's own validation reads. A custom-styled checkbox
+      // often hides the real native input behind CSS (opacity, 1px sizing)
+      // for accessibility, which would also fail clickLikeHuman's own
+      // visibility gate -- so call the native input's own .click()
+      // directly, bypassing that gate entirely, rather than routing
+      // through the generic wrapper-click path.
+      if (nestedNativeChoice) {{
+        try {{ nestedNativeChoice.click(); }} catch (_) {{ clickLikeHuman(control); }}
+      }} else {{
+        clickLikeHuman(control);
+      }}
     }} finally {{
       window.__STATIC_CHOICE_CLICK_GUARD.bypass = false;
     }}
@@ -2081,6 +2163,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
     const questionWords = [
       'prior internship', 'previous internship', 'how many internships', 'number of internships',
       'previously worked', 'former employee', 'current employee', 'current contractor',
+      'worked with us before', 'worked here before', 'worked for us before',
+      '18 years of age', 'age of 18', '18 or older', 'at least 18',
       'how did you hear', 'hear about', 'source',
       'type of role', 'role are you interested', 'role interest', 'interested in',
       'github', 'degree type', 'degree', 'education level',
@@ -2126,6 +2210,9 @@ def _autofill_script(facts: dict[str, str]) -> str:
     const ownLooksLikeQuestionGroup = ownText.length > 90 || rawOwnText.includes(String.fromCharCode(10)) || ownText.includes('?');
     if (ownLooksLikeQuestionGroup && has(norm(ownText), [
       'prior internship', 'previous internship', 'how many internships', 'number of internships',
+      'previously worked', 'former employee', 'current employee', 'current contractor',
+      'worked with us before', 'worked here before', 'worked for us before',
+      '18 years of age', 'age of 18', '18 or older', 'at least 18',
       'how did you hear', 'hear about', 'source',
       'type of role', 'role are you interested', 'role interest', 'interested in',
       'github', 'degree type', 'education level',
@@ -2154,6 +2241,9 @@ def _autofill_script(facts: dict[str, str]) -> str:
       const nodeNorm = norm(text);
       if (has(nodeNorm, [
         'prior internship', 'previous internship', 'how many internships', 'number of internships',
+        'previously worked', 'former employee', 'current employee', 'current contractor',
+        'worked with us before', 'worked here before', 'worked for us before',
+        '18 years of age', 'age of 18', '18 or older', 'at least 18',
         'how did you hear', 'hear about', 'source',
         'type of role', 'role are you interested', 'role interest', 'interested in',
         'github', 'degree type', 'education level',
@@ -2169,14 +2259,18 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function rawCandidateOptionText(control, target, groupText) {{
+    // innerText and textContent are nearly always identical for a plain-text
+    // option cell -- joining both doubled the text. A 66-char answer like
+    // "No, I do not have a disability and have not had one in the past"
+    // became 132 chars, over the 120-char cap below, so it was silently
+    // skipped entirely and never matched against any fact.
+    const textOf = (el) => (el?.innerText || el?.textContent || '');
     const rawPieces = [
-      control.innerText,
-      control.textContent,
+      textOf(control),
       control.getAttribute?.('aria-label'),
       control.getAttribute?.('title'),
       control.getAttribute?.('value'),
-      target !== control ? target.innerText : '',
-      target !== control ? target.textContent : ''
+      target !== control ? textOf(target) : ''
     ].filter(Boolean).join(' ');
     return compactOptionText(rawPieces, groupText);
   }}
@@ -2201,10 +2295,20 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function matchesPreviouslyWorked(optionText, groupText) {{
-    if (!has(groupText, ['previously worked', 'former employee', 'current employee', 'current contractor'])) return false;
+    if (!has(groupText, [
+      'previously worked', 'former employee', 'current employee', 'current contractor',
+      'worked with us before', 'worked here before', 'worked for us before',
+    ])) return false;
     const answerYes = factBool('previously_worked_for_company');
     if (answerYes) return has(optionText, ['yes', 'true']);
     return has(optionText, ['no', 'false']) && !has(optionText, ['not sure']);
+  }}
+
+  function matchesAgeOver18(optionText, groupText) {{
+    if (!has(groupText, ['18 years of age', 'age of 18', '18 or older', 'at least 18'])) return false;
+    const answerYes = factBool('age_over_18');
+    if (answerYes) return has(optionText, ['yes', 'true']);
+    return has(optionText, ['no', 'false']);
   }}
 
   function matchesState(optionText, groupText) {{
@@ -2262,7 +2366,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function matchesDegreeType(optionText, groupText) {{
-    return has(groupText, ['degree type', 'degree', 'education level'])
+    return has(groupText, ['degree type', 'degree', 'education level', 'level of education'])
       && has(optionText, ['undergraduate', 'bachelor', 'bachelors', 'bachelor s', 'bs', 'b s']);
   }}
 
@@ -2328,6 +2432,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (matchesPriorInternships(optionText, groupText)) return 'prior_internships';
     if (matchesHeardAbout(optionText, groupText)) return 'heard_about';
     if (matchesPreviouslyWorked(optionText, groupText)) return 'previously_worked_for_company';
+    if (matchesAgeOver18(optionText, groupText)) return 'age_over_18';
     if (matchesState(optionText, groupText)) return 'state';
     if (matchesRoleInterest(optionText, groupText)) return 'role_interest';
     if (matchesDegreeType(optionText, groupText)) return 'degree';

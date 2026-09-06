@@ -33,8 +33,14 @@ from backend.core.shared_config import (
     read_jobs, update_job, get_memory_store,
 )
 
-# Base skills from the original resume
-BASE_SKILLS = ["Collaboration", "Problem Solving", "Conflict Resolution", "Microsoft Office Suite", "SQL"]
+# Base skills from the current resume
+BASE_SKILLS = [
+    "Python", "Java", "C++", "C", "JavaScript", "SQL",
+    "PyTorch", "TensorFlow", "Scikit-learn", "XGBoost", "Pandas", "NumPy", "AutoGen",
+    "Node.js", "React", "Flutter",
+    "Microsoft Azure", "Azure Machine Learning", "AWS", "Docker", "Firebase", "MySQL", "Linux",
+    "Git", "Postman", "Jupyter Notebook", "Microsoft Graph API", "Microsoft Power Automate",
+]
 
 
 async def fetch_job_description(job: dict, worker_id: int) -> str:
