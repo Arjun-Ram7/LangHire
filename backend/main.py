@@ -795,6 +795,7 @@ async def start_collection(body: CollectRequest):
     requested_titles = _split_collection_titles(body.title)
     max_jobs = body.max_jobs
     filters = body.filters or {}
+    source = body.source or "linkedin"
     status_title = (
         requested_titles[0]
         if len(requested_titles) == 1
@@ -841,7 +842,10 @@ async def start_collection(body: CollectRequest):
                 try:
                     _kill_browser_processes()
                     await asyncio.sleep(0.5)
-                    found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
+                    if source == "speedyapply":
+                        found = await collect_jobs.collect_speedyapply(t, jobs, profile, max_jobs=max_jobs, filters=filters)
+                    else:
+                        found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
                     collected_urls_this_run.update(j.get("url") for j in found if j.get("url"))
                     jobs = read_jobs()
                     print(f"  Found {len(found)} new jobs (total: {len(jobs)})")

@@ -377,6 +377,184 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertNotIn("card-field-input", joined)
         self.assertNotIn("Disability status", questions[-1] if questions else "")
 
+    def test_workday_button_style_select_answers_worked_here_before(self):
+        # matchesPreviouslyWorked only recognized "previously worked", "former
+        # employee", "current employee", "current contractor" in the question
+        # text. Brunswick's real phrasing, "Have you worked with us before?",
+        # matched none of them, so this button-style dropdown stayed blank
+        # and blocked Save and Continue even though we know the answer.
+        result, _ = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Have you worked with us before?</div>
+              <button aria-label="Select One Required">Select One</button>
+            </div>
+            <ul role="listbox">
+              <li role="option">Yes</li>
+              <li role="option">No</li>
+            </ul>
+            """
+        )
+
+        self.assertGreaterEqual(result["selects"] + result["choices"], 1, result)
+
+    def test_workday_button_style_select_answers_age_over_18(self):
+        # No matcher existed at all for age screening questions rendered as
+        # this button-style dropdown, so "Are you 18 years of age or older?"
+        # always fell through to the LLM cleanup agent (or stayed blank).
+        result, _ = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Are you 18 years of age or older?</div>
+              <button aria-label="Select One Required">Select One</button>
+            </div>
+            <ul role="listbox">
+              <li role="option">Yes</li>
+              <li role="option">No</li>
+            </ul>
+            """
+        )
+
+        self.assertGreaterEqual(result["selects"] + result["choices"], 1, result)
+
+    def test_workday_button_style_select_answers_highest_level_of_education(self):
+        # matchesDegreeType required "degree type", "degree", or "education
+        # level" in the question text. Brunswick's real phrasing, "Highest
+        # level of education?", contains none of those exact word orders
+        # ("level of education", not "education level"), so it never matched.
+        result, _ = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Highest level of education?</div>
+              <button aria-label="Select One Required">Select One</button>
+            </div>
+            <ul role="listbox">
+              <li role="option">High School</li>
+              <li role="option">Bachelor's Degree</li>
+              <li role="option">Master's Degree</li>
+            </ul>
+            """
+        )
+
+        self.assertGreaterEqual(result["selects"] + result["choices"], 1, result)
+
+    def test_disability_no_answer_is_not_confused_with_prefer_not_to_answer(self):
+        # valueMatchesFact used plain substring containment: factText "no" is
+        # a substring of "do NOt", so "I do not want to answer" matched a
+        # candidate whose disability_status fact is "No" -- the wrong option,
+        # confirmed on a live Brunswick run where this was clicked instead of
+        # the real "No, I do not have a disability..." choice.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="application-question">
+                  <div class="application-label">Voluntary Self-Identification of Disability</div>
+                  <label for="dis-yes"><input id="dis-yes" type="checkbox">Yes, I have a disability, or have had one in the past</label>
+                  <label for="dis-no"><input id="dis-no" type="checkbox">No, I do not have a disability and have not had one in the past</label>
+                  <label for="dis-prefer-not"><input id="dis-prefer-not" type="checkbox">I do not want to answer</label>
+                </div>
+                """
+            )
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertIsNone(page.locator("#dis-prefer-not").get_attribute("data-static-autofilled"))
+            self.assertEqual(page.locator("#dis-no").get_attribute("data-static-autofilled"), "disability_status")
+        finally:
+            page.close()
+
+    def test_disability_checkbox_click_actually_checks_the_native_input(self):
+        # A live run left the option marked data-static-autofilled/-choice-
+        # locked, but the underlying native <input type="checkbox"> still
+        # reported aria-checked="false" -- the click landed on a wrapper/
+        # label proxy that never toggled the real input Workday validates,
+        # so "Please check one of the boxes below" kept re-appearing.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="application-question">
+                  <div class="application-label">Voluntary Self-Identification of Disability</div>
+                  <div role="cell">
+                    <div class="wrapper">
+                      <input id="dis-no" type="checkbox" aria-checked="false">
+                      <label for="dis-no">No, I do not have a disability and have not had one in the past</label>
+                    </div>
+                  </div>
+                </div>
+                """
+            )
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertTrue(page.locator("#dis-no").is_checked())
+        finally:
+            page.close()
+
+    def test_workday_disability_grid_widget_is_answered_from_facts(self):
+        # Workday's OFCCP voluntary self-identification of disability question
+        # renders as a <div role="grid"> of <div role="row"><div role="cell">
+        # option cells -- no <select>, no input[role=combobox], no native
+        # radio/checkbox inputs at all. A live run had the LLM cleanup agent
+        # find the right cell (by index) but call select_dropdown on it,
+        # which fails outright on a non-native element: "does not contain a
+        # dropdown with option ...". Nothing here resolves it deterministically,
+        # so the agent burned its whole step budget retrying the same wrong
+        # action instead of a plain click.
+        result, _ = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Voluntary Self-Identification of Disability</div>
+              <div role="grid">
+                <div role="row">
+                  <div role="cell"><div></div>Yes, I have a disability, or have had one in the past</div>
+                </div>
+                <div role="row">
+                  <div role="cell"><div></div>No, I do not have a disability and have not had one in the past</div>
+                </div>
+                <div role="cell"><div></div>I do not want to answer</div>
+              </div>
+            </div>
+            """
+        )
+
+        self.assertGreaterEqual(result["choices"] + result["selects"], 1, result)
+
+    def test_workday_button_style_select_is_reported_as_an_open_question(self):
+        # Workday renders some dropdowns as a <button aria-label="Select One
+        # Required" aria-invalid="true"> that opens a popup listbox, not a
+        # native <select> or input[role=combobox]. A live run had this exact
+        # markup for "Highest level of education?": our scanner only visits
+        # SELECT and text-input elements, so this button was entirely
+        # invisible to it -- never counted as required-empty, never recorded
+        # as an open question, never banked to Q&A -- despite sitting blank
+        # with a visible validation error on screen.
+        result, _ = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Highest level of education?</div>
+              <button aria-label="Select One Required" aria-invalid="true">Select One</button>
+            </div>
+            """
+        )
+
+        questions = [q["question"] for q in result["openQuestions"]]
+        self.assertIn("Highest level of education?", questions, result["openQuestions"])
+        self.assertEqual(result["requiredEmpty"], 1, result)
+
+    def test_optional_unmatched_select_is_reported_as_an_open_question(self):
+        # Only REQUIRED blank selects were ever banked to Q&A — an optional
+        # custom dropdown with no fact rule was silently left blank with no
+        # record anywhere, unlike text fields, which report any blank one.
+        result, values = self.run_fixture(
+            """
+            <div class="field"><label for="referral">How did you hear about us?</label>
+              <select id="referral"><option value="">Select</option><option>LinkedIn</option><option>Referral</option></select></div>
+            """
+        )
+
+        questions = [q["question"] for q in result["openQuestions"]]
+        self.assertIn("How did you hear about us?", questions)
+        self.assertEqual(values["referral"], "")
+        self.assertEqual(result["requiredEmpty"], 0)
+
     def test_veteran_and_disability_comboboxes_are_answered(self):
         # Veteran and disability rules existed only on the <select> path, so the
         # combobox form of the same questions was never matched at all.
@@ -768,15 +946,26 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_locked_plain_text_field_becomes_read_only(self):
-        # Read-only stops the LLM agent from wasting steps re-typing a value
-        # static autofill already filled correctly.
+    def test_locked_plain_text_field_is_dropped_from_the_interactive_index(self):
+        # A live Workday run left "First Name" correctly filled by static
+        # autofill, but the old lock (readOnly=true) does not remove a field
+        # from browser_use's own interactive-element index. The cleanup
+        # agent kept re-targeting the same already-correct field at a stable
+        # index, failing identically seven times, until the loop boundary
+        # gave up on the whole job with filled=0. pointer-events:none +
+        # aria-disabled + tabindex=-1 is the pattern already used for
+        # abandoned/locked comboboxes elsewhere in this file, because it is
+        # what actually drops an element from that index.
         page = self.browser.new_page()
         try:
             page.set_content('<label for="first">First Name</label><input id="first">')
             page.evaluate(_autofill_script(WORKDAY_FACTS))
             self.assertEqual(page.locator("#first").input_value(), "Arjun")
-            self.assertTrue(page.locator("#first").evaluate("el => el.readOnly"))
+            self.assertEqual(page.locator("#first").get_attribute("aria-disabled"), "true")
+            self.assertEqual(page.locator("#first").get_attribute("tabindex"), "-1")
+            self.assertEqual(
+                page.locator("#first").evaluate("el => el.style.pointerEvents"), "none"
+            )
         finally:
             page.close()
 

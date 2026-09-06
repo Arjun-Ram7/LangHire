@@ -314,7 +314,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // Multi-select helpers
   const selectableJobs = jobs.filter(
-    (j) => j.status === "pending" || j.status === "failed"
+    (j) =>
+      j.status === "pending" ||
+      j.status === "failed" ||
+      j.status === "manual_review" ||
+      j.status === "blocked"
   );
   const allSelectableSelected =
     selectableJobs.length > 0 &&
@@ -612,7 +616,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             const icon = STATUS_ICONS[job.status] || STATUS_ICONS.pending;
             const styles = STATUS_STYLES[job.status] || STATUS_STYLES.pending;
             const StatusIcon = icon;
-            const isSelectable = job.status === "pending" || job.status === "failed";
+            const isSelectable =
+              job.status === "pending" ||
+              job.status === "failed" ||
+              job.status === "manual_review" ||
+              job.status === "blocked";
             const hasTailoredResume = !!job.tailored_resume_path;
             const isExpanded = expandedJob === job.url;
             return (
