@@ -336,45 +336,65 @@ def _safe_submit_summary_blockers(summary: dict) -> list[str]:
     return blockers[:12]
 
 
+_SUBMISSION_RISK_SCAN_JS = r"""() => {
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== 'hidden'
+      && style.display !== 'none'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 2
+      && rect.height > 2;
+  };
+  // Scope to the open modal/dialog when one exists. A LinkedIn Easy Apply
+  // session sits on top of the normal LinkedIn page, whose unrelated
+  // background chrome (an "update or confirm your email" account nag, a
+  // chat widget's own "Send" button, etc.) previously leaked into a scan of
+  // the whole document.body -- "confirm your email" alone was enough to
+  // misfire human_verification and abandon a job with no real CAPTCHA on
+  // it at all. Fall back to the whole body for a full-page external ATS
+  // form, which has no separate modal to scope to.
+  const modal = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal'))
+    .find(visible);
+  const scanRoot = modal || document.body;
+  const text = norm(scanRoot?.innerText || '');
+  const url = location.href;
+  const patterns = [
+    // 'verify your email'/'confirm your email' were dropped: a live run
+    // false-positived on a routine LinkedIn account nag ("update or confirm
+    // your email") sitting in the page's background chrome. Modal-scoping
+    // above didn't save it because the real Easy Apply modal didn't match
+    // any of the guessed selectors. A genuine verification challenge always
+    // also uses one of the unambiguous phrases below ("verification code",
+    // "otp", etc.), so dropping the two generic phrases loses no real
+    // detection while removing this whole false-positive class.
+    ['human_verification', ['captcha', 'recaptcha', 'hcaptcha', 'verification code', 'one-time code', 'one time code', 'otp', 'two-factor', 'two factor', '2fa']],
+    ['legal_attestation', ['i certify', 'i attest', 'under penalty', 'electronic signature', 'type your name as your signature', 'background check', 'drug test', 'social security', 'ssn']],
+    ['assessment_or_video', ['take assessment', 'complete assessment', 'assessment test', 'video interview', 'record a video', 'work sample']],
+    ['sensitive_manual_review', ['security clearance', 'government clearance', 'export control', 'export-controlled', 'non-compete']]
+  ];
+  const flags = [];
+  for (const [name, words] of patterns) {
+    if (words.some((word) => text.includes(word))) flags.push(name);
+  }
+  const finalish = Array.from(scanRoot.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]'))
+    .filter(visible)
+    .map((el) => norm([el.innerText, el.textContent, el.value, el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' ')))
+    .filter((label) => /\b(submit|send|finish|complete|apply)\b/.test(label))
+    .slice(0, 8);
+  return {url, flags: [...new Set(flags)], finalish, bodySample: text.slice(0, 300)};
+}"""
+
+
 async def _submission_risk_scan(browser: BrowserSession) -> dict:
     """Scan visible page text for cases we should always leave manual."""
     try:
         page = await browser.get_current_page()
         if page is None:
             return {"flags": ["no_current_page"], "url": ""}
-        raw = await page.evaluate(
-            r"""() => {
-              const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-              const text = norm(document.body?.innerText || '');
-              const url = location.href;
-              const patterns = [
-                ['human_verification', ['captcha', 'recaptcha', 'hcaptcha', 'verification code', 'one-time code', 'one time code', 'otp', 'two-factor', 'two factor', '2fa', 'verify your email', 'confirm your email']],
-                ['legal_attestation', ['i certify', 'i attest', 'under penalty', 'electronic signature', 'type your name as your signature', 'background check', 'drug test', 'social security', 'ssn']],
-                ['assessment_or_video', ['take assessment', 'complete assessment', 'assessment test', 'video interview', 'record a video', 'work sample']],
-                ['sensitive_manual_review', ['security clearance', 'government clearance', 'export control', 'export-controlled', 'non-compete']]
-              ];
-              const flags = [];
-              for (const [name, words] of patterns) {
-                if (words.some((word) => text.includes(word))) flags.push(name);
-              }
-              const visible = (el) => {
-                if (!el) return false;
-                const style = getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.visibility !== 'hidden'
-                  && style.display !== 'none'
-                  && Number(style.opacity || 1) > 0
-                  && rect.width > 2
-                  && rect.height > 2;
-              };
-              const finalish = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]'))
-                .filter(visible)
-                .map((el) => norm([el.innerText, el.textContent, el.value, el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' ')))
-                .filter((label) => /\b(submit|send|finish|complete|apply)\b/.test(label))
-                .slice(0, 8);
-              return {url, flags: [...new Set(flags)], finalish, bodySample: text.slice(0, 300)};
-            }"""
-        )
+        raw = await page.evaluate(_SUBMISSION_RISK_SCAN_JS)
         if isinstance(raw, dict):
             return raw
         try:

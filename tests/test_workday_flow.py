@@ -1,14 +1,81 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from playwright.sync_api import sync_playwright
+
 from backend.core.workday_flow import (
     WorkdayDeterministicUnavailable,
+    _SUBMISSION_RISK_SCAN_JS,
     _can_run_llm_cleanup,
     _cleanup_succeeded,
     save_open_questions,
     is_workday_url,
     run_workday_deterministic,
 )
+
+
+class SubmissionRiskScanTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    def test_routine_email_nag_banner_is_not_a_verification_challenge(self):
+        # A live LinkedIn Easy Apply run left a job in manual_review over a
+        # "CAPTCHA/human verification challenge" that did not exist. The
+        # actual page had a routine LinkedIn account nag ("update or confirm
+        # your email") sitting in the page's background chrome, outside the
+        # Easy Apply modal -- but live inspection showed the modal did not
+        # match any of the guessed modal selectors, so scoping alone did not
+        # save it. The real fix: "confirm/verify your email" are ambiguous
+        # phrases that show up in routine account UI, not just verification
+        # challenges, so they are no longer in the pattern list at all.
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div>Emails aren't getting through to one of your email addresses.
+                  Please update or confirm your email. More info</div>
+                <div>
+                  <div>Contact info</div>
+                  <input id="email" value="arjun@example.com">
+                  <button>Next</button>
+                </div>
+                """
+            )
+            result = page.evaluate(_SUBMISSION_RISK_SCAN_JS)
+            self.assertNotIn("human_verification", result["flags"], result)
+        finally:
+            page.close()
+
+    def test_real_captcha_inside_the_modal_is_still_caught(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div role="dialog">
+                  <div>Please complete the CAPTCHA to continue</div>
+                </div>
+                """
+            )
+            result = page.evaluate(_SUBMISSION_RISK_SCAN_JS)
+            self.assertIn("human_verification", result["flags"], result)
+        finally:
+            page.close()
+
+    def test_full_page_form_with_no_modal_still_scans_the_body(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content("<div>Enter the verification code we emailed you</div>")
+            result = page.evaluate(_SUBMISSION_RISK_SCAN_JS)
+            self.assertIn("human_verification", result["flags"], result)
+        finally:
+            page.close()
 
 
 class CanRunLlmCleanupTests(unittest.TestCase):
