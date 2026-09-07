@@ -277,6 +277,14 @@ def _can_run_llm_cleanup(summary: dict, preflight: dict) -> bool:
     url = str(summary.get("url") or surface.get("url") or "").lower()
     if "linkedin.com" not in url:
         return bool(surface.get("accountish"))
+    # Preflight already clicked LinkedIn's own Easy Apply button and opened
+    # its modal -- that is a legitimate application surface, just one that
+    # never leaves linkedin.com. Blanket-refusing every linkedin.com URL left
+    # the agent stuck on page one of the modal, unable to click Next, for
+    # every Easy Apply job. guard_final_submit and the submit-guard script
+    # make this exactly as safe as continuing on any external ATS page.
+    if preflight.get("clicked_linkedin") and preflight.get("easy_apply"):
+        return True
     # Preflight deliberately avoids risky/ambiguous controls. When it cannot
     # reach Apply, vision-based Gemini must get a bounded attempt instead of us
     # silently leaving the job on LinkedIn.

@@ -19,7 +19,7 @@ WORKDAY_FACTS = {
     "first_name": "Arjun",
     "last_name": "Ramachandran",
     "email": "arjun@example.com",
-    "phone_full": "+15409143128",
+    "phone_full": "+15555550123",
     "country": "USA",
     "citizenship": "India",
     "nationality": "India",
@@ -254,10 +254,10 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
             <div class="q"><label for="addr">Legal address:</label>
               <input id="addr" required></div>
             """,
-            {**WORKDAY_FACTS, "street_address": "504 Hunt Club Rd"},
+            {**WORKDAY_FACTS, "street_address": "123 Main St"},
         )
 
-        self.assertEqual(values["addr"], "504 Hunt Club Rd", result["debugInputs"])
+        self.assertEqual(values["addr"], "123 Main St", result["debugInputs"])
 
     def test_banked_answer_fills_a_question_no_rule_matches(self):
         # The whole point of banking: answer once, then it is filled
@@ -1248,7 +1248,7 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
                 <div class="field"><label for="phoneNumber--phoneNumber">Phone Number</label>
                   <input id="phoneNumber--phoneNumber" required></div>
                 <div class="field"><label for="phoneNumber--extension">Phone Extension</label>
-                  <input id="phoneNumber--extension" value="+15409143128"></div>
+                  <input id="phoneNumber--extension" value="+15555550123"></div>
                 <div class="field"><label for="address--countryRegion">State</label>
                   <button id="address--countryRegion" aria-label="State Select One Required">Select One</button>
                   <div role="option" onclick="window.selectedState = 'Virginia'">Virginia</div>
@@ -1263,14 +1263,14 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
                 _autofill_script(
                     {
                         **WORKDAY_FACTS,
-                        "phone": "540 914 3128",
-                        "phone_full": "+15409143128",
+                        "phone": "555 555 0123",
+                        "phone_full": "+15555550123",
                         "state": "Virginia",
                         "previously_worked_for_company": "no",
                     }
                 )
             )
-            self.assertEqual(page.locator("#phoneNumber--phoneNumber").input_value(), "5409143128")
+            self.assertEqual(page.locator("#phoneNumber--phoneNumber").input_value(), "5555550123")
             self.assertEqual(page.locator("#phoneNumber--extension").input_value(), "")
             self.assertEqual(page.evaluate("window.selectedState"), "Virginia")
             self.assertTrue(page.locator("#previous-no").is_checked())
@@ -1529,10 +1529,10 @@ if __name__ == "__main__":
 
 class FactDerivationTests(unittest.TestCase):
     def test_age_is_derived_from_date_of_birth(self):
-        self.assertEqual(_age_from_dob("2006-10-28", date(2026, 8, 9)), 19)
+        self.assertEqual(_age_from_dob("2000-11-05", date(2026, 8, 9)), 25)
 
     def test_age_increments_on_the_birthday_itself(self):
-        self.assertEqual(_age_from_dob("2006-10-28", date(2026, 10, 28)), 20)
+        self.assertEqual(_age_from_dob("2000-11-05", date(2026, 11, 5)), 26)
 
     def test_age_is_blank_without_a_usable_date_of_birth(self):
         self.assertEqual(_age_from_dob("", date(2026, 8, 9)), "")
@@ -1545,7 +1545,7 @@ class FactDerivationTests(unittest.TestCase):
             patch("backend.core.autofill_facts.ensure_autofill_facts_file"),
             patch(
                 "backend.core.autofill_facts._parse_facts_file",
-                return_value={"date_of_birth": "10/28/2006", "age": "11"},
+                return_value={"date_of_birth": "11/05/2000", "age": "11"},
             ),
             patch("backend.core.autofill_facts._age_from_dob", return_value=20),
         ):

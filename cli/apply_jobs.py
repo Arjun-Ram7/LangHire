@@ -497,6 +497,7 @@ async def _run_apply_preflight(
         "clicked_external": False,
         "current_url": "",
         "notes": notes,
+        "easy_apply": easy_apply,
     }
     try:
         await browser.start()

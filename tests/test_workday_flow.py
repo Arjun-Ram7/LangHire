@@ -3,11 +3,31 @@ from unittest.mock import AsyncMock, patch
 
 from backend.core.workday_flow import (
     WorkdayDeterministicUnavailable,
+    _can_run_llm_cleanup,
     _cleanup_succeeded,
     save_open_questions,
     is_workday_url,
     run_workday_deterministic,
 )
+
+
+class CanRunLlmCleanupTests(unittest.TestCase):
+    def test_allows_cleanup_on_an_opened_easy_apply_modal(self):
+        # Preflight already clicked LinkedIn's own Easy Apply button and
+        # opened its modal -- the cleanup agent should be allowed to
+        # continue it, same as it would on any external ATS page. Blanket-
+        # refusing every linkedin.com URL left the agent stuck on page one
+        # of the modal, unable to click Next, for every Easy Apply job.
+        summary = {"url": "https://www.linkedin.com/jobs/view/12345/", "surface": {}}
+        preflight = {"clicked_linkedin": True, "easy_apply": True}
+        self.assertTrue(_can_run_llm_cleanup(summary, preflight))
+
+    def test_refuses_cleanup_for_a_non_easy_apply_job_stuck_on_linkedin(self):
+        # An external-apply job that never left LinkedIn (button not found,
+        # no redirect) is still the stuck case this guard exists for.
+        summary = {"url": "https://www.linkedin.com/jobs/view/12345/", "surface": {}}
+        preflight = {"clicked_linkedin": True, "easy_apply": False}
+        self.assertFalse(_can_run_llm_cleanup(summary, preflight))
 
 
 class IsWorkdayUrlTests(unittest.TestCase):
