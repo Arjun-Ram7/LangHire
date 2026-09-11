@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Play, Square, Terminal, Loader2, Plus } from "lucide-react";
+import { Play, Square, Terminal, Loader2, Plus, ShieldCheck } from "lucide-react";
 import {
   startJobCollection,
   stopJobCollection,
@@ -7,6 +7,9 @@ import {
   getPlugins,
   getProfile,
   addJob,
+  startVisaScreening,
+  stopVisaScreening,
+  getVisaScreeningStatus,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 import type { PluginConfig } from "../../lib/types";
@@ -33,6 +36,17 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [statusMaxJobs, setStatusMaxJobs] = useState(0);
   const [collectFilters, setCollectFilters] = useState<Record<string, string>>({});
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [collectionRunId, setCollectionRunId] = useState<string | null>(null);
+
+  // Posting-by-posting F-1/H-1B screening state
+  const [visaChecking, setVisaChecking] = useState(false);
+  const [visaChecked, setVisaChecked] = useState(0);
+  const [visaTotal, setVisaTotal] = useState(0);
+  const [visaCompatible, setVisaCompatible] = useState(0);
+  const [visaNeedsReview, setVisaNeedsReview] = useState(0);
+  const [visaIneligible, setVisaIneligible] = useState(0);
+  const [visaFetchFailed, setVisaFetchFailed] = useState(0);
+  const [visaLog, setVisaLog] = useState<string[]>([]);
 
   // Add job form state
   const [showAddJobForm, setShowAddJobForm] = useState(false);
@@ -44,6 +58,13 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
   const selectedPlugin = availableSources.find((s) => s.name === collectSource);
+
+  const effectiveCollectFilters = Object.fromEntries(
+    (selectedPlugin?.filters || []).map((filter) => [
+      filter.key,
+      collectFilters[filter.key] ?? filter.default ?? "",
+    ])
+  );
 
   // Load available plugins/sources
   useEffect(() => {
@@ -75,6 +96,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           setCollected(s.collected || 0);
           setStatusMaxJobs(s.max_jobs || 0);
         }
+        setCollectionRunId(s.run_id || null);
       })
       .catch(() => {});
   }, []);
@@ -96,6 +118,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           setCollectLog(s.log || []);
           setCollected(s.collected || 0);
           setStatusMaxJobs(s.max_jobs || 0);
+          setCollectionRunId(s.run_id || null);
         })
         .catch(() => {});
     }, 2000);
@@ -104,6 +127,35 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       clearInterval(poll);
     };
   }, [collecting, onJobsChanged]);
+
+  // Poll the separate visa-screening worker.
+  useEffect(() => {
+    let active = true;
+    let wasRunning = visaChecking;
+    const update = () => {
+      getVisaScreeningStatus()
+        .then((s) => {
+          if (!active) return;
+          if (wasRunning && !s.running) onJobsChanged();
+          wasRunning = s.running;
+          setVisaChecking(s.running);
+          setVisaChecked(s.checked || 0);
+          setVisaTotal(s.total || 0);
+          setVisaCompatible(s.compatible || 0);
+          setVisaNeedsReview(s.needs_review || 0);
+          setVisaIneligible(s.ineligible || 0);
+          setVisaFetchFailed(s.fetch_failed || 0);
+          setVisaLog(s.log || []);
+        })
+        .catch(() => {});
+    };
+    update();
+    const poll = setInterval(update, 2000);
+    return () => {
+      active = false;
+      clearInterval(poll);
+    };
+  }, [visaChecking, onJobsChanged]);
 
   // Auto-scroll log
   useEffect(() => {
@@ -125,7 +177,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         collectTitle || undefined,
         collectMaxJobs ? Number(collectMaxJobs) : undefined,
         collectSource,
-        collectFilters
+        effectiveCollectFilters
       );
       if (res.success) {
         setCollecting(true);
@@ -146,8 +198,40 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   };
 
   const handleStopCollect = async () => {
-    await stopJobCollection();
-    setCollecting(false);
+    try {
+      const result = await stopJobCollection();
+      setCollectLog((previous) => [...previous, result.message || "Collection is stopping safely..."]);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to stop collection");
+    }
+  };
+
+  const handleStartVisaCheck = async () => {
+    try {
+      const result = await startVisaScreening(collectionRunId || undefined);
+      if (!result.success) {
+        alert(result.message);
+        return;
+      }
+      setVisaChecking(true);
+      setVisaChecked(0);
+      setVisaCompatible(0);
+      setVisaNeedsReview(0);
+      setVisaIneligible(0);
+      setVisaFetchFailed(0);
+      setVisaLog([result.message]);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to start visa screening");
+    }
+  };
+
+  const handleStopVisaCheck = async () => {
+    try {
+      const result = await stopVisaScreening();
+      setVisaLog((previous) => [...previous, result.message || "Visa screening is stopping..."]);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to stop visa screening");
+    }
   };
 
   // Add job manually
@@ -185,6 +269,20 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         >
           <Plus className="w-4 h-4" /> Add Job
         </button>
+        {visaChecking ? (
+          <button onClick={handleStopVisaCheck} className="btn-destructive">
+            <Square className="w-4 h-4" /> Stop F-1 Check
+          </button>
+        ) : (
+          <button
+            onClick={handleStartVisaCheck}
+            disabled={collecting}
+            className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+            title={collecting ? "Wait for collection to finish" : "Open and screen each job in the latest collected batch"}
+          >
+            <ShieldCheck className="w-4 h-4" /> Run F-1/H-1B Check
+          </button>
+        )}
       </div>
 
       {/* Add Job Form */}
@@ -334,7 +432,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
             }
             placeholder={t("collector.maxJobsPlaceholder")}
             min={1}
-            max={200}
+            max={500}
             className="input-base !w-32 !flex-initial"
             disabled={collecting}
             title={t("collector.maxJobsTitle")}
@@ -380,6 +478,37 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           </div>
         )}
       </div>
+
+      {(visaChecking || visaLog.length > 0) && (
+        <div className="card mb-5">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="section-title">F-1/H-1B Posting Check</h3>
+              <p className="text-[13px] text-muted-foreground mt-1">
+                Opens each posting without clicking Apply and checks its description for sponsorship,
+                citizenship, U.S.-person, permanent-work-authorization, and security-clearance language.
+              </p>
+            </div>
+            {visaChecking && <Loader2 className="w-5 h-5 animate-spin text-primary flex-shrink-0" />}
+          </div>
+          {visaTotal > 0 && (
+            <div className="mb-4">
+              <ProgressBar
+                percent={Math.min(100, (visaChecked / visaTotal) * 100)}
+                label={`${visaChecked}/${visaTotal} checked · ${visaCompatible} compatible · ${visaNeedsReview} review · ${visaIneligible} blocked · ${visaFetchFailed} unreadable`}
+              />
+            </div>
+          )}
+          <div className="log-viewer">
+            <div className="flex items-center gap-2 mb-2 text-gray-400">
+              <Terminal className="w-3.5 h-3.5" /> Visa screening log
+            </div>
+            {visaLog.map((line, index) => (
+              <LogLine key={index} line={line} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <AutomationDialog
         open={showConfirmDialog}

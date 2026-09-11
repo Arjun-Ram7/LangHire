@@ -22,7 +22,7 @@
     "sourcePlatform": "소스 플랫폼",
     "jobTitlePlaceholder": "직종명 (예: '데이터 분석가') 또는 전체는 비워두세요",
     "maxJobsPlaceholder": "최대 채용 수",
-    "maxJobsTitle": "수집할 최대 채용 수 (직종당)",
+    "maxJobsTitle": "수집할 최대 총 채용 수 (모든 직종 합계)",
     "stop": "중지",
     "start": "시작",
     "startingCollection": "수집 시작 중...",

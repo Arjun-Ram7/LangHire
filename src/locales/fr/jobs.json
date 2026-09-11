@@ -22,7 +22,7 @@
     "sourcePlatform": "Plateforme source",
     "jobTitlePlaceholder": "Titre du poste (ex. 'Analyste de données') ou laisser vide pour tous",
     "maxJobsPlaceholder": "Max emplois",
-    "maxJobsTitle": "Max emplois à collecter (par titre)",
+    "maxJobsTitle": "Nombre maximal total d’emplois à collecter (tous les intitulés confondus)",
     "stop": "Arrêter",
     "start": "Démarrer",
     "startingCollection": "Démarrage de la collecte...",

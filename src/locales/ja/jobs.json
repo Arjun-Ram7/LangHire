@@ -22,7 +22,7 @@
     "sourcePlatform": "ソースプラットフォーム",
     "jobTitlePlaceholder": "職種名（例：'データアナリスト'）またはすべてを対象にする場合は空欄",
     "maxJobsPlaceholder": "最大件数",
-    "maxJobsTitle": "収集する最大求人数（タイトルごと）",
+    "maxJobsTitle": "収集する求人の最大総数（すべての職種を合計）",
     "stop": "停止",
     "start": "開始",
     "startingCollection": "収集を開始しています...",

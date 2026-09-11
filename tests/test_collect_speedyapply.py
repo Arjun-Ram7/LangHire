@@ -17,6 +17,13 @@ class TitleMatchesSpeedyapplyPositionTests(unittest.TestCase):
             )
         )
 
+    def test_engineering_and_engineer_are_equivalent(self):
+        self.assertTrue(
+            _title_matches_speedyapply_position(
+                "Software Engineering Intern", "Software Engineer Intern"
+            )
+        )
+
     def test_matches_ml_titled_position(self):
         self.assertTrue(
             _title_matches_speedyapply_position(
@@ -71,9 +78,11 @@ class CollectSpeedyapplyTests(unittest.IsolatedAsyncioTestCase):
         ]
         with (
             patch("cli.collect_jobs.BrowserSession") as MockBrowser,
+            patch("cli.collect_jobs.clear_stale_browser_session_state"),
             patch("cli.collect_jobs.read_jobs", return_value={}),
-            patch("cli.collect_jobs.write_jobs") as mock_write,
+            patch("cli.collect_jobs.atomic_upsert_job") as mock_upsert,
         ):
+            mock_upsert.side_effect = lambda url, job: (job, True)
             browser_instance = MockBrowser.return_value
             browser_instance.start = AsyncMock()
             browser_instance.close = AsyncMock()
@@ -87,10 +96,10 @@ class CollectSpeedyapplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["company"], "Microsoft")
-        self.assertEqual(found[0]["status"], "pending")
-        saved_jobs = mock_write.call_args[0][0]
-        self.assertIn("https://apply.careers.microsoft.com/careers/job/1", saved_jobs)
-        self.assertNotIn("https://acme.example.com/jobs/2", saved_jobs)
+        self.assertEqual(found[0]["status"], "manual_review")
+        self.assertEqual(found[0]["screening_status"], "pending")
+        self.assertEqual(mock_upsert.call_count, 1)
+        self.assertEqual(mock_upsert.call_args.args[0], "https://apply.careers.microsoft.com/careers/job/1")
 
     async def test_does_not_resave_already_collected_url(self):
         rows = [
@@ -106,8 +115,9 @@ class CollectSpeedyapplyTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch("cli.collect_jobs.BrowserSession") as MockBrowser,
+            patch("cli.collect_jobs.clear_stale_browser_session_state"),
             patch("cli.collect_jobs.read_jobs", return_value=dict(existing)),
-            patch("cli.collect_jobs.write_jobs") as mock_write,
+            patch("cli.collect_jobs.atomic_upsert_job") as mock_upsert,
         ):
             browser_instance = MockBrowser.return_value
             browser_instance.start = AsyncMock()
@@ -121,7 +131,7 @@ class CollectSpeedyapplyTests(unittest.IsolatedAsyncioTestCase):
                 found = await collect_speedyapply("Software Engineer Intern", existing, PROFILE, max_jobs=10)
 
         self.assertEqual(found, [])
-        mock_write.assert_called_once_with(existing)
+        mock_upsert.assert_not_called()
 
 
 if __name__ == "__main__":

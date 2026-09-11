@@ -65,6 +65,15 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("No save location was selected".to_string());
+    }
+    std::fs::write(&path, contents)
+        .map_err(|e| format!("Failed to save text file to {path}: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -72,7 +81,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_log::Builder::new().build())
         .manage(Backend(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_api_token, open_file])
+        .invoke_handler(tauri::generate_handler![get_api_token, open_file, write_text_file])
         .setup(|app| {
             let shell = app.shell();
             match shell.sidecar("langhire-backend") {

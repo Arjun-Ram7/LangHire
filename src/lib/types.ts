@@ -99,13 +99,18 @@ export interface Job {
   company: string;
   location: string;
   easy_apply: boolean | null;
-  status: "pending" | "in_progress" | "applied" | "failed" | "blocked";
+  status: "pending" | "in_progress" | "applied" | "failed" | "blocked" | "manual_review";
   source?: string;
   search_title?: string;
   collected_at?: string;
   applied_at?: string;
   error?: string;
   description?: string;
+  screening_status?: "pending" | "compatible" | "ineligible" | "needs_review" | "fetch_failed" | "legacy_unverified" | "invalid_page";
+  visa_screening_status?: "not_required" | "compatible" | "ineligible" | "needs_review";
+  visa_screening_evidence?: string;
+  location_screening_status?: "us" | "non_us" | "unknown";
+  screening_checked_at?: string;
   tailored_resume_path?: string;
 }
 
@@ -255,10 +260,27 @@ export interface CollectionStatus {
   max_jobs: number;
   error: string | null;
   finished_at: string | null;
+  run_id?: string | null;
+}
+
+export interface VisaScreeningStatus {
+  running: boolean;
+  log: string[];
+  checked: number;
+  total: number;
+  compatible: number;
+  needs_review: number;
+  ineligible: number;
+  fetch_failed: number;
+  error: string | null;
+  finished_at: string | null;
+  run_id?: string | null;
+  source_run_id?: string | null;
 }
 
 export interface ApplyStatus {
   running: boolean;
+  paused?: boolean;
   mode: string | null;
   workers: number;
   log: string[];

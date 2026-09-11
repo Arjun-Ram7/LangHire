@@ -21,9 +21,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 try:
-    from models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from models import CollectRequest, VisaScreenRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from collection_limits import next_title_collection_limit
+    from application_queue import preparable_statuses, select_preparable_jobs
 except ImportError:
-    from backend.models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from backend.models import CollectRequest, VisaScreenRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from backend.collection_limits import next_title_collection_limit
+    from backend.application_queue import preparable_statuses, select_preparable_jobs
 
 from core.config import get_data_dir, load_settings, save_settings, load_profile, save_profile
 from core.config import load_llm_settings, save_llm_settings
@@ -63,7 +67,7 @@ async def lifespan(app: FastAPI):
     import traceback
     _log.info(f"Backend shutting down... (trigger: lifespan exit)")
     _log.info(f"Shutdown stack:\n{''.join(traceback.format_stack())}")
-    for status_dict in (_collection_status, _apply_status):
+    for status_dict in (_collection_status, _visa_screen_status, _apply_status):
         if status_dict.get("running"):
             _force_stop(status_dict)
     # Give workers a moment to clean up, then force-kill browsers
@@ -136,7 +140,9 @@ class _RateLimiter:
         return True
 
 _rate_limiter = _RateLimiter(max_calls=60, window_seconds=60)
-_rate_limited_prefixes = ("/jobs/collect", "/apply/start", "/apply/stop", "/llm/test", "/auth/login")
+_rate_limited_prefixes = (
+    "/jobs/collect", "/jobs/visa-screen", "/apply/start", "/apply/stop", "/llm/test", "/auth/login"
+)
 
 _ALLOWED_ORIGINS = {"http://localhost:1420", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://127.0.0.1:1420"}
 
@@ -478,7 +484,11 @@ async def health():
             pass
 
     llm_configured = bool(load_llm_settings().get("provider"))
-    worker_running = _collection_status.get("running") or _apply_status.get("running")
+    worker_running = (
+        _collection_status.get("running")
+        or _visa_screen_status.get("running")
+        or _apply_status.get("running")
+    )
 
     all_ok = db_ok and chromium_ok and llm_configured
     return {
@@ -615,19 +625,27 @@ class _LogCapture(io.StringIO):
 
 def _run_async_in_thread(coro_factory, status_dict):
     """Run an async function in a new thread with its own event loop, capturing stdout and logs."""
-    run_id = status_dict.get("run_id", "")
+    run_id = str(uuid.uuid4())[:8]
+    status_dict["run_id"] = run_id
+    status_dict["running"] = True
+    status_dict["cancel_requested"] = False
+    status_dict["error"] = None
+    status_dict["finished_at"] = None
     metrics = _get_metrics_store()
 
     def _worker():
+        loop = None
+        worker_thread_id = threading.get_ident()
         capture = _LogCapture(status_dict["log"], status_dict=status_dict,
                               metrics_store=metrics, run_id=run_id)
 
         class _ListHandler(logging.Handler):
             _noise = {"httpx", "httpcore", "urllib3", "filelock", "websockets",
                        "charset_normalizer", "botocore", "boto3", "s3transfer"}
-            _collected_re = __import__("re").compile(r"(\d+)\s+jobs?\s+collected", __import__("re").IGNORECASE)
             _ansi_re = __import__("re").compile(r"\x1b\[[0-9;]*m")
             def emit(self, record):
+                if record.thread != worker_thread_id:
+                    return
                 if record.name.split(".")[0] in self._noise:
                     return
                 msg = self._ansi_re.sub("", record.getMessage()).strip()
@@ -636,10 +654,6 @@ def _run_async_in_thread(coro_factory, status_dict):
                         status_dict["log"].append(msg)
                         if len(status_dict["log"]) > MAX_LOG_LINES:
                             del status_dict["log"][:MAX_LOG_LINES // 2]
-                        if "collected" in status_dict:
-                            m = self._collected_re.search(msg)
-                            if m:
-                                status_dict["collected"] = max(status_dict.get("collected", 0), int(m.group(1)))
                     if metrics and run_id:
                         try:
                             level = record.levelname
@@ -675,19 +689,14 @@ def _run_async_in_thread(coro_factory, status_dict):
                 status_dict["error"] = str(e)
         finally:
             logging.getLogger().removeHandler(log_handler)
-            loop.close()
+            if loop is not None:
+                loop.close()
             with _status_lock:
                 status_dict["running"] = False
                 status_dict["cancel_requested"] = False
                 status_dict["finished_at"] = datetime.now().isoformat()
             status_dict.pop("_loop", None)
 
-    run_id = str(uuid.uuid4())[:8]
-    status_dict["run_id"] = run_id
-    status_dict["running"] = True
-    status_dict["cancel_requested"] = False
-    status_dict["error"] = None
-    status_dict["finished_at"] = None
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     return t
@@ -698,12 +707,13 @@ def _kill_browser_processes():
     Uses psutil for cross-platform support (macOS, Linux, Windows)."""
     try:
         import psutil
-        target = "langhire/browser_profile"
+        target = str(Path(_get_browser_profile_dir()).resolve()).replace("\\", "/").casefold()
         procs_to_kill = []
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 cmdline = proc.info.get("cmdline") or []
-                if any(target in arg for arg in cmdline):
+                normalized_args = [str(arg).replace("\\", "/").casefold() for arg in cmdline]
+                if any(target in arg for arg in normalized_args):
                     procs_to_kill.append(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
@@ -722,16 +732,7 @@ def _kill_browser_processes():
     except ImportError:
         import subprocess
         try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/F", "/FI", "IMAGENAME eq chrome.exe"],
-                    timeout=5, capture_output=True,
-                )
-                subprocess.run(
-                    ["taskkill", "/F", "/FI", "IMAGENAME eq chromium.exe"],
-                    timeout=5, capture_output=True,
-                )
-            else:
+            if sys.platform != "win32":
                 subprocess.run(
                     ["pkill", "-f", "user-data-dir=.*langhire/browser_profile"],
                     timeout=3, capture_output=True,
@@ -754,6 +755,13 @@ def _force_stop(status_dict):
     _kill_browser_processes()
     with _status_lock:
         status_dict["log"].append("🛑 Force stopped")
+
+
+def _request_graceful_stop(status_dict):
+    """Ask a collector to stop at its next safe checkpoint."""
+    with _status_lock:
+        status_dict["cancel_requested"] = True
+        status_dict["log"].append("🛑 Stop requested — finishing the current page safely")
 
 
 # ── Thread-safe status access ─────────────────────────────────────────────
@@ -788,6 +796,12 @@ async def start_collection(body: CollectRequest):
 
     if _collection_status["running"]:
         return {"success": False, "message": "Collection already running"}
+    if _apply_status.get("running"):
+        return {"success": False, "message": "Cannot collect while job applications are running"}
+    if _visa_screen_status.get("running"):
+        return {"success": False, "message": "Cannot collect while visa screening is running"}
+    if _login_running:
+        return {"success": False, "message": "Close the login browser before starting collection"}
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
@@ -803,8 +817,7 @@ async def start_collection(body: CollectRequest):
         if requested_titles
         else "all titles"
     )
-    status_max_jobs = max_jobs * len(requested_titles) if max_jobs and requested_titles else max_jobs
-    _collection_status = {"running": True, "title": status_title, "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": status_max_jobs}
+    _collection_status = {"running": True, "title": status_title, "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": max_jobs}
 
     async def _do_collect():
         """Run collection logic directly, bypassing argparse."""
@@ -822,54 +835,99 @@ async def start_collection(body: CollectRequest):
         # Load profile from the app data dir (set via UI), not the project root
         profile = load_profile()
         jobs = read_jobs()
+        quarantined = collect_jobs.quarantine_legacy_unscreened_jobs(jobs, profile)
+        if quarantined:
+            print(f"🛡️ Moved {quarantined} previously unscreened jobs to Manual Review")
         LOGS_DIR.mkdir(exist_ok=True)
 
         titles = requested_titles or profile.get("target_job_titles", [])
-        if max_jobs and titles and not requested_titles:
-            with _status_lock:
-                _collection_status["max_jobs"] = max_jobs * len(titles)
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
         collected_urls_this_run: set[str] = set()
+        resumable_urls = {
+            url for url, job in jobs.items()
+            if job.get("screening_status") in {"pending", "fetch_failed"}
+            and job.get("status") == "manual_review"
+        }
+        title_errors: list[str] = []
 
         try:
             for i, t in enumerate(titles):
                 if _collection_status.get("cancel_requested"):
                     print("🛑 Stop requested — halting collection")
                     break
+                title_max_jobs = next_title_collection_limit(
+                    max_jobs,
+                    len(collected_urls_this_run),
+                    len(titles) - i,
+                )
+                if max_jobs > 0 and title_max_jobs == 0:
+                    print(f"✅ Reached {max_jobs} jobs total — stopping collection")
+                    break
                 print(f"\n{'='*60}")
                 print(f"[{i+1}/{len(titles)}] Collecting: {t}")
                 print(f"{'='*60}")
-                try:
-                    _kill_browser_processes()
-                    await asyncio.sleep(0.5)
-                    if source == "speedyapply":
-                        found = await collect_jobs.collect_speedyapply(t, jobs, profile, max_jobs=max_jobs, filters=filters)
-                    else:
-                        found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
-                    collected_urls_this_run.update(j.get("url") for j in found if j.get("url"))
-                    jobs = read_jobs()
-                    print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
-                except Exception as e:
-                    print(f"  Error: {e}")
-                finally:
-                    _kill_browser_processes()
-                    await asyncio.sleep(0.3)
+                for title_attempt in range(3):
+                    try:
+                        collector_kwargs = {
+                            "max_jobs": title_max_jobs,
+                            "filters": filters,
+                            "cancel_flag": _collection_status,
+                            "run_id": _collection_status.get("run_id", ""),
+                        }
+                        if source == "speedyapply":
+                            found = await collect_jobs.collect_speedyapply(t, jobs, profile, **collector_kwargs)
+                        else:
+                            collector_kwargs["allowed_titles"] = titles
+                            found = await collect_jobs.collect_for_title(t, jobs, profile, **collector_kwargs)
+                        collected_urls_this_run.update(j.get("url") for j in found if j.get("url"))
+                        jobs = read_jobs()
+                        print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
+                        break
+                    except Exception as e:
+                        error_text = str(e).lower()
+                        transient = any(token in error_text for token in (
+                            "rate-limit", "rate limit", "too many requests", "429",
+                            "session with given id not found", "browser not connected",
+                            "security token", "temporarily unavailable",
+                        ))
+                        if transient and title_attempt < 2 and not _collection_status.get("cancel_requested"):
+                            delay = 30 * (title_attempt + 1)
+                            print(
+                                f"  ⚠️  Temporary LinkedIn/browser failure for {t}; "
+                                f"cooling down {delay}s before retry {title_attempt + 2}/3"
+                            )
+                            for _ in range(delay):
+                                if _collection_status.get("cancel_requested"):
+                                    break
+                                await asyncio.sleep(1)
+                            if not _collection_status.get("cancel_requested"):
+                                continue
+                        title_errors.append(f"{t}: {e}")
+                        print(f"  ❌ Error collecting {t}: {e}")
+                        break
 
-            if not _collection_status.get("cancel_requested") and collected_urls_this_run:
+            if not _collection_status.get("cancel_requested") and (collected_urls_this_run or resumable_urls):
                 jobs = read_jobs()
-                subset = {u: jobs[u] for u in collected_urls_this_run if u in jobs}
-                await collect_jobs.collect_descriptions(subset, profile)
+                urls_to_screen = collected_urls_this_run | resumable_urls
+                subset = {u: jobs[u] for u in urls_to_screen if u in jobs}
+                await collect_jobs.collect_descriptions(subset, profile, cancel_flag=_collection_status)
+            if title_errors:
+                raise RuntimeError("; ".join(title_errors))
         finally:
             cred_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cred_task
 
-        # Summary
+        # Current-run summary (historical totals made earlier runs misleading).
         jobs = read_jobs()
-        easy = sum(1 for j in jobs.values() if j.get("easy_apply"))
-        pending = sum(1 for j in jobs.values() if j.get("status") == "pending")
-        descs = sum(1 for j in jobs.values() if j.get("description"))
-        print(f"\nCollection complete! Total: {len(jobs)} (Easy Apply: {easy}), Pending: {pending}, With descriptions: {descs}")
+        run_jobs = [jobs[url] for url in collected_urls_this_run if url in jobs]
+        compatible = sum(1 for job in run_jobs if job.get("screening_status") == "compatible")
+        review = sum(1 for job in run_jobs if job.get("status") == "manual_review")
+        blocked = sum(1 for job in run_jobs if job.get("status") == "blocked")
+        print(
+            f"\nCollection complete! New jobs this run: {len(run_jobs)} "
+            f"(F-1/H-1B compatible: {compatible}, Manual Review: {review}, Blocked: {blocked})"
+        )
 
     def make_coro():
         return _do_collect()
@@ -880,8 +938,13 @@ async def start_collection(body: CollectRequest):
 
 @app.post("/jobs/collect/stop")
 async def stop_collection():
-    _force_stop(_collection_status)
-    return {"success": True}
+    if not _collection_status.get("running"):
+        return {"success": True, "message": "Collection is not running"}
+    if _collection_status.get("cancel_requested"):
+        _force_stop(_collection_status)
+        return {"success": True, "message": "Collection force-stopped"}
+    _request_graceful_stop(_collection_status)
+    return {"success": True, "message": "Collection is stopping safely"}
 
 
 @app.get("/jobs/collect/status")
@@ -899,6 +962,116 @@ async def collection_status():
         }
 
 
+# ── F-1 / H-1B Posting Screening ────────────────────────────────────────
+_visa_screen_status: dict = {
+    "running": False,
+    "log": [],
+    "checked": 0,
+    "total": 0,
+    "compatible": 0,
+    "needs_review": 0,
+    "ineligible": 0,
+    "fetch_failed": 0,
+}
+_visa_screen_thread: threading.Thread | None = None
+
+
+@app.post("/jobs/visa-screen")
+async def start_visa_screening(body: VisaScreenRequest):
+    """Re-open collected postings one at a time and run strict visa checks."""
+    global _visa_screen_thread, _visa_screen_status
+
+    if _visa_screen_status.get("running"):
+        return {"success": False, "message": "Visa screening is already running"}
+    if _collection_status.get("running"):
+        return {"success": False, "message": "Wait for job collection to finish first"}
+    if _apply_status.get("running"):
+        return {"success": False, "message": "Stop job applications before visa screening"}
+    if _login_running:
+        return {"success": False, "message": "Close the login browser before visa screening"}
+
+    all_jobs = _load_jobs()
+    candidates = [
+        (url, job)
+        for url, job in all_jobs.items()
+        if job.get("status") != "applied"
+        and str(url).startswith(("http://", "https://"))
+        and (not body.run_id or job.get("collection_run_id") == body.run_id)
+    ]
+    candidates.sort(key=lambda item: item[1].get("collected_at", ""), reverse=True)
+    if body.limit:
+        candidates = candidates[:body.limit]
+    if not candidates:
+        scope = "the latest collection run" if body.run_id else "the job list"
+        return {"success": False, "message": f"No jobs were found in {scope}"}
+
+    selected_jobs = dict(candidates)
+    _visa_screen_status = {
+        "running": True,
+        "log": [f"Preparing to check {len(selected_jobs)} postings individually..."],
+        "checked": 0,
+        "total": len(selected_jobs),
+        "compatible": 0,
+        "needs_review": 0,
+        "ineligible": 0,
+        "fetch_failed": 0,
+        "source_run_id": body.run_id,
+    }
+
+    async def _do_screen():
+        from cli import collect_jobs
+
+        profile = load_profile()
+
+        def on_progress(progress: dict):
+            with _status_lock:
+                for key in (
+                    "checked", "compatible", "needs_review", "ineligible", "fetch_failed"
+                ):
+                    _visa_screen_status[key] = progress.get(key, _visa_screen_status.get(key, 0))
+
+        await collect_jobs.screen_jobs_individually(
+            selected_jobs,
+            profile,
+            cancel_flag=_visa_screen_status,
+            progress_callback=on_progress,
+        )
+
+    _kill_browser_processes()
+    _visa_screen_thread = _run_async_in_thread(lambda: _do_screen(), _visa_screen_status)
+    return {"success": True, "message": f"Started visa screening for {len(selected_jobs)} jobs"}
+
+
+@app.post("/jobs/visa-screen/stop")
+async def stop_visa_screening():
+    if not _visa_screen_status.get("running"):
+        return {"success": True, "message": "Visa screening is not running"}
+    if _visa_screen_status.get("cancel_requested"):
+        _force_stop(_visa_screen_status)
+        return {"success": True, "message": "Visa screening force-stopped"}
+    _request_graceful_stop(_visa_screen_status)
+    return {"success": True, "message": "Visa screening is stopping safely"}
+
+
+@app.get("/jobs/visa-screen/status")
+async def visa_screening_status():
+    with _status_lock:
+        return {
+            "running": _visa_screen_status.get("running", False),
+            "log": list(_visa_screen_status.get("log", [])[-100:]),
+            "checked": _visa_screen_status.get("checked", 0),
+            "total": _visa_screen_status.get("total", 0),
+            "compatible": _visa_screen_status.get("compatible", 0),
+            "needs_review": _visa_screen_status.get("needs_review", 0),
+            "ineligible": _visa_screen_status.get("ineligible", 0),
+            "fetch_failed": _visa_screen_status.get("fetch_failed", 0),
+            "error": _visa_screen_status.get("error"),
+            "finished_at": _visa_screen_status.get("finished_at"),
+            "run_id": _visa_screen_status.get("run_id"),
+            "source_run_id": _visa_screen_status.get("source_run_id"),
+        }
+
+
 # ── Application Control ──────────────────────────────────────────────────
 _apply_status: dict = {"running": False, "mode": None, "workers": 1, "log": []}
 _apply_thread: threading.Thread | None = None
@@ -911,15 +1084,38 @@ async def start_applying(body: ApplyRequest):
 
     if _apply_status["running"]:
         return {"success": False, "message": "Application already running"}
+    if _collection_status.get("running"):
+        return {"success": False, "message": "Cannot apply while job collection is running"}
+    if _visa_screen_status.get("running"):
+        return {"success": False, "message": "Cannot apply while visa screening is running"}
+    if _login_running:
+        return {"success": False, "message": "Close the login browser before starting applications"}
 
-    # Kill any leftover browser processes from previous runs
-    _kill_browser_processes()
-
-    workers = 1 if body.mode == "review" else body.workers
+    workers = 1 if body.mode in {"review", "fapply"} else body.workers
     mode = body.mode
     limit = body.limit
     target_job_url = body.job_url
     target_job_urls = body.job_urls
+
+    # Validate targeted runs before launching a background worker. Previously
+    # the API returned success for manual-review selections, then the worker
+    # silently discarded every job and stopped immediately.
+    requested_urls = [target_job_url] if target_job_url else (target_job_urls or [])
+    if requested_urls:
+        current_jobs = _load_jobs()
+        selected_preview = select_preparable_jobs(current_jobs, requested_urls, mode)
+        if not selected_preview:
+            if target_job_url not in current_jobs and not target_job_urls:
+                return {"success": False, "message": "Job not found"}
+            allowed = ", ".join(sorted(preparable_statuses(mode)))
+            return {
+                "success": False,
+                "message": f"None of the selected jobs can be prepared (allowed statuses: {allowed})",
+            }
+
+    # Kill leftover automation browsers only after the request is known to be
+    # actionable. An invalid selection should not disturb an open session.
+    _kill_browser_processes()
 
     if target_job_url:
         _apply_status = {"running": True, "mode": mode, "workers": 1, "log": [f"Applying to single job..."]}
@@ -928,50 +1124,45 @@ async def start_applying(body: ApplyRequest):
     else:
         _apply_status = {"running": True, "mode": mode, "workers": workers, "log": [f"Starting {mode} apply with {workers} worker(s)..."]}
 
-    # Review/all modes process the collected queue regardless of apply type.
-    easy_apply_filter = None if mode in {"all", "review"} else (mode != "external")
+    # Review/Fapply/all modes process the collected queue regardless of apply type.
+    easy_apply_filter = None if mode in {"all", "review", "fapply"} else (mode != "external")
 
     async def _do_apply():
         """Run apply logic directly, bypassing argparse."""
         from core.shared_config import JOBS_FILE, CANDIDATE_PROFILE, QA_FILE, LOGS_DIR, load_json, credential_refresh_loop, get_memory_store
-        from cli import apply_jobs
+        from cli import apply_jobs, collect_jobs
         import core.shared_config as _config
 
-        # Override config.get_llm with the user's UI-configured LLM
-        llm_settings = load_llm_settings()
-        if llm_settings.get("provider"):
-            from core.llm_factory import create_llm
-            _config.get_llm = lambda: create_llm(llm_settings)
-            print(f"🤖 Using {llm_settings['provider']} LLM from settings")
+        # Fapply mode intentionally makes zero LangHire LLM calls.
+        if mode != "fapply":
+            llm_settings = load_llm_settings()
+            if llm_settings.get("provider"):
+                from core.llm_factory import create_llm
+                _config.get_llm = lambda: create_llm(llm_settings)
+                print(f"🤖 Using {llm_settings['provider']} LLM from settings")
 
         jobs = load_json(JOBS_FILE, {})
+        for job_url, job in jobs.items():
+            job.setdefault("url", job_url)
         profile = load_json(CANDIDATE_PROFILE, {})
+        quarantined = collect_jobs.quarantine_legacy_unscreened_jobs(jobs, profile)
+        if quarantined:
+            print(f"🛡️ Skipped {quarantined} jobs that were not confirmed compatible with F-1/H-1B requirements")
         qa = load_json(QA_FILE, {})
         LOGS_DIR.mkdir(exist_ok=True)
 
-        if target_job_url:
-            target = jobs.get(target_job_url)
-            if not target:
-                print("Job not found.")
-                return
-            if target.get("status") not in ("pending", "failed"):
-                print(f"Job is already {target.get('status')}.")
-                return
-            # Reset to pending so the worker can claim it
-            from core.shared_config import update_job as _update_job
-            _update_job(target_job_url, status="pending", error=None)
-            target["status"] = "pending"
-            pending = [target]
-        elif target_job_urls:
-            # Batch apply: only apply to the specific selected jobs
+        if target_job_url or target_job_urls:
+            # Targeted run: review mode also accepts jobs waiting for manual
+            # screening review. Preparing is non-submitting and leaves the
+            # final decision with the user in the open browser tab.
             from core.shared_config import update_job as _update_job
             pending = []
-            for url in target_job_urls:
-                j = jobs.get(url)
-                if j and j.get("status") in ("pending", "failed"):
-                    _update_job(url, status="pending", error=None)
-                    j["status"] = "pending"
-                    pending.append(j)
+            selected = select_preparable_jobs(jobs, requested_urls, mode)
+            for url, job in selected:
+                # Reset to pending so the worker can claim it.
+                _update_job(url, status="pending", error=None)
+                job["status"] = "pending"
+                pending.append(job)
         elif easy_apply_filter is None:
             pending = [j for j in jobs.values() if j.get("status") == "pending"]
         else:
@@ -985,6 +1176,18 @@ async def start_applying(body: ApplyRequest):
 
         if not pending:
             print("No pending jobs to apply to.")
+            return
+
+        if mode == "fapply":
+            from cli.fapply_queue import run_fapply_queue
+
+            print(
+                "Starting Fapply-only queue: navigate to verified application forms, "
+                "reuse deterministic/LLM help for landing and account gates only, "
+                "click Fapply once, verify populated fields, skip failures after 60 seconds, never submit."
+            )
+            stats = await run_fapply_queue(pending, profile, cancel_flag=_apply_status)
+            print(f"\nFapply queue results: {stats}")
             return
 
         if mode == "review":
@@ -1066,6 +1269,7 @@ async def apply_status():
     with _status_lock:
         return {
             "running": _apply_status.get("running", False),
+            "paused": _apply_status.get("paused", False),
             "mode": _apply_status.get("mode"),
             "workers": _apply_status.get("workers", 1),
             "log": list(_apply_status.get("log", [])[-100:]),
@@ -1265,6 +1469,15 @@ async def auth_login(service: str):
 
     if _login_running:
         return {"success": False, "message": "A login browser is already open. Please use it or close it first."}
+    if (
+        _collection_status.get("running")
+        or _visa_screen_status.get("running")
+        or _apply_status.get("running")
+    ):
+        return {
+            "success": False,
+            "message": "Stop collection, visa screening, or applications before opening the login browser.",
+        }
 
     urls = {
         "linkedin": "https://www.linkedin.com/login",

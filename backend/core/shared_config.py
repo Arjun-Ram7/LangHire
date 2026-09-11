@@ -39,6 +39,33 @@ RESUMES_DIR = BASE_DIR / "resumes"
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
 
 
+def clear_stale_browser_session_state() -> int:
+    """Remove restorable tab state without touching cookies or login data.
+
+    The profile belongs only to LangHire.  Clearing its saved tabs prevents a
+    crashed run from reopening dozens of job pages on the next collection.
+    Callers must ensure no LangHire browser is currently using the profile.
+    """
+    candidates = [
+        BROWSER_PROFILE_DIR / "Default" / "Current Session",
+        BROWSER_PROFILE_DIR / "Default" / "Current Tabs",
+        BROWSER_PROFILE_DIR / "Default" / "Last Session",
+        BROWSER_PROFILE_DIR / "Default" / "Last Tabs",
+    ]
+    sessions_dir = BROWSER_PROFILE_DIR / "Default" / "Sessions"
+    if sessions_dir.is_dir():
+        candidates.extend(path for path in sessions_dir.iterdir() if path.is_file())
+    removed = 0
+    for path in candidates:
+        try:
+            if path.exists():
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def find_brave_browser() -> str | None:
     """Return the installed Brave Browser executable, if present.
 
@@ -256,6 +283,44 @@ def update_job(url: str, **fields):
         if url in jobs:
             jobs[url].update(fields)
             save_json(JOBS_FILE, jobs)
+
+
+def upsert_job(url: str, fields: dict, *, preserve_status: bool = True) -> tuple[dict, bool]:
+    """Atomically insert or merge one job and return ``(job, created)``.
+
+    Collector code used to lock the read and write separately, which allowed a
+    concurrent apply worker to be overwritten between those two operations.
+    Keeping the complete read/merge/write transaction under one file lock also
+    avoids downgrading an already-applied job during metadata refreshes.
+    """
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        existing = jobs.get(url, {})
+        created = url not in jobs
+        merged = {**existing, **fields, "url": url}
+        if existing.get("collected_at"):
+            merged["collected_at"] = existing["collected_at"]
+        if preserve_status and existing.get("status") in {"applied", "in_progress"}:
+            merged["status"] = existing["status"]
+        jobs[url] = merged
+        save_json(JOBS_FILE, jobs)
+        return dict(merged), created
+
+
+def update_jobs_bulk(updates: dict[str, dict]) -> int:
+    """Atomically apply field updates to multiple existing jobs."""
+    if not updates:
+        return 0
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        changed = 0
+        for url, fields in updates.items():
+            if url in jobs:
+                jobs[url].update(fields)
+                changed += 1
+        if changed:
+            save_json(JOBS_FILE, jobs)
+        return changed
 
 
 _claim_lock = threading.Lock()

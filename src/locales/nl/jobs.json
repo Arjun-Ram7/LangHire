@@ -22,7 +22,7 @@
     "sourcePlatform": "Bronplatform",
     "jobTitlePlaceholder": "Functietitel (bijv. 'Data Analyst') of leeg laten voor alle",
     "maxJobsPlaceholder": "Max. banen",
-    "maxJobsTitle": "Max. banen om te verzamelen (per titel)",
+    "maxJobsTitle": "Max. totaal aantal te verzamelen banen (voor alle functietitels samen)",
     "stop": "Stop",
     "start": "Start",
     "startingCollection": "Verzameling wordt gestart...",

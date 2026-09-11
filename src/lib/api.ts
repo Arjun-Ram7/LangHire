@@ -14,6 +14,7 @@ import type {
   HealthResponse,
   RunMetric,
   CollectionStatus,
+  VisaScreeningStatus,
   ApplyStatus,
   DashboardResponse,
   DomainInfo,
@@ -190,11 +191,31 @@ export async function deleteJobs(urls: string[]) {
 }
 
 export async function stopJobCollection() {
-  return request<{ success: boolean }>("/jobs/collect/stop", { method: "POST" });
+  return request<{ success: boolean; message?: string }>("/jobs/collect/stop", { method: "POST" });
 }
 
 export async function getCollectionStatus() {
   return request<CollectionStatus>("/jobs/collect/status");
+}
+
+export async function startVisaScreening(runId?: string, limit?: number) {
+  return request<{ success: boolean; message: string }>("/jobs/visa-screen", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(runId ? { run_id: runId } : {}),
+      ...(limit ? { limit } : {}),
+    }),
+  });
+}
+
+export async function stopVisaScreening() {
+  return request<{ success: boolean; message?: string }>("/jobs/visa-screen/stop", {
+    method: "POST",
+  });
+}
+
+export async function getVisaScreeningStatus() {
+  return request<VisaScreeningStatus>("/jobs/visa-screen/status");
 }
 
 // ── Memory ────────────────────────────────────────────────────────────────
@@ -418,4 +439,3 @@ export async function removePlugin(name: string) {
 export async function reloadPlugins() {
   return request<{ success: boolean; count: number }>("/plugins/reload", { method: "POST" });
 }
-

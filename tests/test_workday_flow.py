@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 from backend.core.workday_flow import (
     WorkdayDeterministicUnavailable,
     _SUBMISSION_RISK_SCAN_JS,
+    _application_tab_score,
     _can_run_llm_cleanup,
     _cleanup_succeeded,
     save_open_questions,
@@ -79,6 +80,20 @@ class SubmissionRiskScanTests(unittest.TestCase):
 
 
 class CanRunLlmCleanupTests(unittest.TestCase):
+    def test_allows_bounded_cleanup_on_external_account_or_sign_in_surface(self):
+        summary = {
+            "url": "https://careers.example.com/create-account",
+            "surface": {"accountish": True, "formish": True},
+        }
+        self.assertTrue(_can_run_llm_cleanup(summary, {"clicked_linkedin": True}))
+
+    def test_refuses_cleanup_on_linkedin_account_surface(self):
+        summary = {
+            "url": "https://www.linkedin.com/login",
+            "surface": {"accountish": True, "formish": True},
+        }
+        self.assertFalse(_can_run_llm_cleanup(summary, {"clicked_linkedin": True, "easy_apply": False}))
+
     def test_allows_cleanup_on_an_opened_easy_apply_modal(self):
         # Preflight already clicked LinkedIn's own Easy Apply button and
         # opened its modal -- the cleanup agent should be allowed to
@@ -95,6 +110,24 @@ class CanRunLlmCleanupTests(unittest.TestCase):
         summary = {"url": "https://www.linkedin.com/jobs/view/12345/", "surface": {}}
         preflight = {"clicked_linkedin": True, "easy_apply": False}
         self.assertFalse(_can_run_llm_cleanup(summary, preflight))
+
+
+class ApplicationTabScoreTests(unittest.TestCase):
+    def test_prefers_real_tesla_apply_tab(self):
+        apply_score = _application_tab_score(
+            "https://www.tesla.com/careers/search/job/apply/282340",
+            "Job Application",
+            "Tesla",
+        )
+        posting_score = _application_tab_score(
+            "https://www.tesla.com/careers/search/job/282340",
+            "Internship, Embedded Software",
+            "Tesla",
+        )
+        self.assertGreater(apply_score, posting_score)
+
+    def test_ignores_blank_popup(self):
+        self.assertLess(_application_tab_score("about:blank", "", "Tesla"), 0)
 
 
 class IsWorkdayUrlTests(unittest.TestCase):

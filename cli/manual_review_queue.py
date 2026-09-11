@@ -3,7 +3,7 @@
 By default this is intentionally not an autonomous submitter. It opens each
 pending job in its own tab, clicks through to the employer application surface
 when possible, runs deterministic autofill/upload, installs the final-submit
-guard, gives bounded Gemini cleanup (including login/account flows) a chance,
+guard, gives bounded Gemini cleanup on application fields a chance,
 then records a manual_review status and moves on. Repeated Gemini page states
 are a deterministic stop boundary: the current tab remains open and the next
 job is opened in a new tab. The optional
@@ -42,7 +42,7 @@ try:
         refresh_credentials,
         update_job,
     )
-    from core.autofill_facts import load_autofill_facts
+    from core.autofill_facts import load_autofill_facts, release_review_handoff
     from core.workday_flow import (
         _can_run_llm_cleanup,
         _maybe_safe_submit,
@@ -67,7 +67,7 @@ except ImportError:
         refresh_credentials,
         update_job,
     )
-    from backend.core.autofill_facts import load_autofill_facts
+    from backend.core.autofill_facts import load_autofill_facts, release_review_handoff
     from backend.core.workday_flow import (
         _can_run_llm_cleanup,
         _maybe_safe_submit,
@@ -164,9 +164,12 @@ async def open_for_manual_review(
             worker_id=worker_id,
             close_existing_tabs=False,
             open_in_new_tab=True,
+            cancel_flag=cancel_flag,
         )
         await _wait_for_page_settle(browser, 1.0)
-        review = await _static_fill_passes(browser, facts, resume_path, passes, worker_id)
+        review = await _static_fill_passes(
+            browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag
+        )
         summary_before_llm = _summarize_review(review)
         needs_cleanup = _needs_llm_cleanup(summary_before_llm) or not preflight.get("clicked_linkedin")
         can_cleanup = _can_run_llm_cleanup(summary_before_llm, preflight)
@@ -190,6 +193,7 @@ async def open_for_manual_review(
                 max_steps=scaled_steps,
                 timeout=scaled_timeout,
                 cancel_flag=cancel_flag,
+                ignored_target_ids=set(preflight.get("initial_target_ids") or []),
             )
             if cleanup.get("last_review"):
                 review = cleanup["last_review"]
@@ -297,6 +301,16 @@ async def open_for_manual_review(
         else:
             error = "Manual review tab left open; finish/submit manually"
 
+        handoff = await release_review_handoff(browser)
+        if handoff.get("error"):
+            print(f"  ⚠️  [W{worker_id}] Could not fully unlock manual-review tab: {handoff['error']}")
+        else:
+            print(
+                f"  🖱️  [W{worker_id}] Manual controls restored: "
+                f"fields={int(handoff.get('controls') or 0)} "
+                f"submit={int(handoff.get('finalSubmits') or 0)}"
+            )
+
         update_job(
             url,
             status=status,
@@ -317,13 +331,22 @@ async def open_for_manual_review(
     except Exception as exc:
         current_url = current_url or await _page_url(browser)
         error = f"Manual review setup error: {type(exc).__name__}: {str(exc)[:400]}"
+        failure_summary = _summarize_review(review or {})
+        try:
+            save_open_questions(failure_summary, current_url, store=config.get_memory_store())
+        except Exception:
+            pass
+        try:
+            await release_review_handoff(browser)
+        except Exception:
+            pass
         update_job(
             url,
             status="manual_review",
             error=error,
             manual_review_at=datetime.now(timezone.utc).isoformat(),
             manual_review_url=current_url,
-            manual_review_summary=_summarize_review(review or {}),
+            manual_review_summary=failure_summary,
             manual_review_notes=(preflight.get("notes") or [])[-12:] if isinstance(preflight, dict) else [],
         )
         print(f"  ⚠️  [W{worker_id}] Left tab after setup error: {title} at {company} — {error[:120]}")

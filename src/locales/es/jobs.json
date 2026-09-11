@@ -22,7 +22,7 @@
     "sourcePlatform": "Plataforma fuente",
     "jobTitlePlaceholder": "Título del puesto (ej. 'Analista de Datos') o dejar vacío para todos",
     "maxJobsPlaceholder": "Máx. empleos",
-    "maxJobsTitle": "Máx. empleos a recopilar (por título)",
+    "maxJobsTitle": "Máximo total de empleos a recopilar (entre todos los títulos)",
     "stop": "Detener",
     "start": "Iniciar",
     "startingCollection": "Iniciando recopilación...",

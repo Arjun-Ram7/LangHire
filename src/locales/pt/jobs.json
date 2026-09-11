@@ -22,7 +22,7 @@
     "sourcePlatform": "Plataforma fonte",
     "jobTitlePlaceholder": "Cargo (ex.: 'Analista de Dados') ou deixe vazio para todos",
     "maxJobsPlaceholder": "Máx. vagas",
-    "maxJobsTitle": "Máx. vagas a coletar (por cargo)",
+    "maxJobsTitle": "Máximo total de vagas a coletar (em todos os cargos)",
     "stop": "Parar",
     "start": "Iniciar",
     "startingCollection": "Iniciando coleta...",

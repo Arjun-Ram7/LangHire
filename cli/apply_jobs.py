@@ -33,12 +33,15 @@ try:
         read_jobs, claim_job, update_job, get_memory_store,
     )
     from core.autofill_facts import (
+        _pause_control_overlay_script,
         format_facts_for_prompt,
         load_autofill_facts,
         probe_workday_human_checkpoint,
         run_static_autofill,
+        set_ai_pause_control,
         try_controlled_final_submit,
         wait_for_workday_human_checkpoint,
+        wait_while_ai_paused,
     )
     from core.workday_flow import (
         WorkdayDeterministicUnavailable,
@@ -65,12 +68,15 @@ except ImportError:
         read_jobs, claim_job, update_job, get_memory_store,
     )
     from backend.core.autofill_facts import (
+        _pause_control_overlay_script,
         format_facts_for_prompt,
         load_autofill_facts,
         probe_workday_human_checkpoint,
         run_static_autofill,
+        set_ai_pause_control,
         try_controlled_final_submit,
         wait_for_workday_human_checkpoint,
+        wait_while_ai_paused,
     )
     from backend.core.workday_flow import (
         WorkdayDeterministicUnavailable,
@@ -362,18 +368,49 @@ def _click_apply_button_script(mode: str) -> str:
     ];
     return clean(bits.filter(Boolean).join(' '));
   };
+  const actionLabelFor = (el) => clean([
+    el.innerText, el.value, el.getAttribute('aria-label'), el.getAttribute('title')
+  ].filter(Boolean).join(' '));
   const candidates = allElements(
     'button,a,[role="button"],input[type="button"],input[type="submit"],div[aria-label],span[role="button"]'
   )
     .filter(isVisible)
-    .map((el) => ({ el, label: labelFor(el), lower: norm(labelFor(el)) }))
+    .map((el) => ({
+      el,
+      label: labelFor(el),
+      lower: norm(labelFor(el)),
+      actionLabel: actionLabelFor(el),
+      actionLower: norm(actionLabelFor(el)),
+    }))
     .filter((item) => item.lower);
 
   const bad = /(submit final|final submit|finish application|send application|complete application|withdraw|delete|remove|save|saved|share|follow|notify|alert|report|tailor|tailor my resume|resume tools?|job-apply-resources|autofill|auto fill|use my last application|last application|resume autofill|mygreenhouse|my greenhouse|quick apply with|sign in|signin|log in|login|forgot password|reset password|security code|verification code|one[- ]time code|magic link)/i;
-  const isBad = (item) => bad.test(item.label);
+  const isBad = (item) => bad.test(`${item.actionLabel} ${item.label}`);
+  const isLikelyFinalFormControl = (item) => {
+    const form = item.el.closest('form');
+    if (!form) return false;
+    const editable = Array.from(form.querySelectorAll('input, textarea, select, [contenteditable="true"]'))
+      .filter((el) => {
+        const type = norm(el.getAttribute('type'));
+        return isVisible(el) && !['hidden', 'button', 'submit', 'reset', 'image'].includes(type);
+      });
+    return editable.length >= 2;
+  };
   const click = (item, reason) => {
     item.el.scrollIntoView({ block: 'center', inline: 'center' });
     item.el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+    if (reason === 'external_apply') {
+      const rect = item.el.getBoundingClientRect();
+      return {
+        clicked: true,
+        trusted_click_required: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        reason,
+        label: item.label.slice(0, 180),
+        url: window.location.href
+      };
+    }
     item.el.click();
     return { clicked: true, reason, label: item.label.slice(0, 180), url: window.location.href };
   };
@@ -419,7 +456,9 @@ def _click_apply_button_script(mode: str) -> str:
       /^apply$/i
     ];
     for (const pattern of patterns) {
-      const match = candidates.find((item) => pattern.test(item.label) && !isBad(item));
+      const match = candidates.find((item) =>
+        pattern.test(item.actionLabel) && !isBad(item) && !isLikelyFinalFormControl(item)
+      );
       if (match) return click(match, 'external_apply');
     }
   }
@@ -438,12 +477,35 @@ async def _click_apply_button(browser: BrowserSession, mode: str) -> dict:
     page = await _current_page(browser)
     raw = await page.evaluate(_click_apply_button_script(mode), mode)
     if isinstance(raw, dict):
-        return raw
-    try:
-        parsed = json.loads(raw) if raw else {}
-    except (json.JSONDecodeError, TypeError):
-        parsed = {"clicked": False, "raw": raw}
-    return parsed if isinstance(parsed, dict) else {"clicked": False, "raw": raw}
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            parsed = {"clicked": False, "raw": raw}
+    parsed = parsed if isinstance(parsed, dict) else {"clicked": False, "raw": raw}
+    if parsed.get("trusted_click_required"):
+        try:
+            x = float(parsed.get("x"))
+            y = float(parsed.get("y"))
+            cdp_session = await browser.get_or_create_cdp_session()
+            for event_type, button, buttons in (
+                ("mouseMoved", "none", 0),
+                ("mousePressed", "left", 1),
+                ("mouseReleased", "left", 0),
+            ):
+                params = {"type": event_type, "x": x, "y": y, "button": button, "buttons": buttons}
+                if event_type == "mousePressed":
+                    params["clickCount"] = 1
+                await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+                    params=params,
+                    session_id=cdp_session.session_id,
+                )
+            parsed["trusted_click"] = True
+        except Exception as exc:
+            parsed["clicked"] = False
+            parsed["trusted_click_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return parsed
 
 
 async def _probe_application_surface(browser: BrowserSession) -> dict:
@@ -482,6 +544,8 @@ async def _run_apply_preflight(
     worker_id: int,
     close_existing_tabs: bool = True,
     open_in_new_tab: bool = False,
+    run_static: bool = True,
+    cancel_flag: dict | None = None,
 ) -> dict:
     """Fast deterministic navigation to the real application surface.
 
@@ -498,11 +562,20 @@ async def _run_apply_preflight(
         "current_url": "",
         "notes": notes,
         "easy_apply": easy_apply,
+        "initial_target_ids": [],
     }
     try:
         await browser.start()
+        initial_tabs = await browser.get_tabs()
+        result["initial_target_ids"] = [str(tab.target_id) for tab in initial_tabs]
+        try:
+            await browser._cdp_add_init_script(_pause_control_overlay_script())
+        except Exception:
+            pass
         result["started"] = True
         await browser.navigate_to(url, new_tab=open_in_new_tab)
+        await set_ai_pause_control(browser, False)
+        await wait_while_ai_paused(browser, cancel_flag, worker_id)
         await _wait_for_page_settle(browser, 2.5)
         if close_existing_tabs:
             await _close_other_tabs(browser, worker_id, "preflight start")
@@ -522,11 +595,13 @@ async def _run_apply_preflight(
         else:
             notes.append(f"LinkedIn did not render usable body before apply search: {linkedin_surface}")
 
-        try:
-            await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
-        except Exception:
-            pass
+        if run_static:
+            try:
+                await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
+            except Exception:
+                pass
 
+        await wait_while_ai_paused(browser, cancel_flag, worker_id)
         before_tabs = await browser.get_tabs()
         before_target_ids = {tab.target_id for tab in before_tabs}
         before_url = await _page_url(browser)
@@ -554,12 +629,13 @@ async def _run_apply_preflight(
         else:
             notes.append(f"same-tab apply surface: {current}")
 
-        try:
-            autofill_result = await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
-            if autofill_result.get("filled") or autofill_result.get("selects") or autofill_result.get("choices"):
-                notes.append("static autofill ran after LinkedIn click")
-        except Exception:
-            pass
+        if run_static:
+            try:
+                autofill_result = await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
+                if autofill_result.get("filled") or autofill_result.get("selects") or autofill_result.get("choices"):
+                    notes.append("static autofill ran after LinkedIn click")
+            except Exception:
+                pass
 
         if easy_apply:
             # Easy Apply/Quick Apply lives in a LinkedIn modal. Let static fill
@@ -571,6 +647,9 @@ async def _run_apply_preflight(
             notes.append("external page looks like a form/login surface; still checking for an obvious employer apply button")
 
         for attempt in range(3):
+            await wait_while_ai_paused(browser, cancel_flag, worker_id)
+            if cancel_flag and cancel_flag.get("cancel_requested"):
+                break
             current = await _page_url(browser)
             if not current:
                 break
@@ -592,18 +671,34 @@ async def _run_apply_preflight(
                 else:
                     notes.append("external apply button not found after retries")
                 break
+            opened_external, after_click_url = await _wait_for_new_or_redirected_tab(
+                browser, before_target_ids, before_url, timeout=12
+            )
+            await _wait_for_page_settle(browser, 5.0)
+            form_probe = await _probe_application_surface(browser)
+            transitioned = bool(
+                opened_external
+                or (after_click_url and after_click_url != before_url)
+                or form_probe.get("looksLikeForm")
+            )
+            if not transitioned:
+                notes.append(
+                    f"external click had no effect on pass {attempt + 1}: "
+                    f"{click_result.get('label', '')[:100]}"
+                )
+                if attempt < 2:
+                    continue
+                break
             result["clicked_external"] = True
             notes.append(f"clicked external button: {click_result.get('label', '')}")
-            print(f"  ⚡ [W{worker_id}] Preflight clicked external button: {click_result.get('label', '')[:80]}")
-            await _wait_for_new_or_redirected_tab(browser, before_target_ids, before_url, timeout=12)
-            await _wait_for_page_settle(browser, 5.0)
-            try:
-                await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
-            except Exception:
-                pass
+            print(f"  ⚡ [W{worker_id}] Preflight opened external application: {click_result.get('label', '')[:80]}")
+            if run_static:
+                try:
+                    await run_static_autofill(browser, static_facts, resume_path, guard_final_submit=guard_final_submit)
+                except Exception:
+                    pass
 
             # Once a form, login, or upload surface appears, stop pre-clicking.
-            form_probe = await _probe_application_surface(browser)
             if form_probe.get("looksLikeForm"):
                 notes.append("stopped preflight on form/login surface")
                 break

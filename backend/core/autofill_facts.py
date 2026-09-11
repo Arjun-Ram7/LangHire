@@ -611,6 +611,13 @@ def _autofill_script(facts: dict[str, str]) -> str:
   function questionText(el) {{
     const candidates = [];
     const host = escapeShadowBoundary(el);
+    // Ashby commonly renders a question as a sibling immediately before the
+    // field wrapper instead of using a <label>. Prefer that local text over
+    // the broad matching summary, which can contain neighbouring questions.
+    const hostPrevious = host.previousElementSibling;
+    if (hostPrevious) candidates.push(clean(hostPrevious.innerText || hostPrevious.textContent || ''));
+    const hostParentPrevious = host.parentElement?.previousElementSibling;
+    if (hostParentPrevious) candidates.push(clean(hostParentPrevious.innerText || hostParentPrevious.textContent || ''));
     const container = host.closest(QUESTION_CONTAINER_SELECTOR);
     if (container) {{
       // The question sits in the container but outside the control's own
@@ -1027,6 +1034,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     el.dataset.staticAbandoned = 'true';
     result.abandoned += 1;
     pushLimited(result.abandonedLabels, fieldSummary(el));
+    recordOpenQuestion(el);
     // Deliberately not setting `disabled`: browsers omit disabled controls from
     // FormData, which would strip a partially typed answer from the real
     // submission. This combination blocks interaction without that side effect.
@@ -1042,7 +1050,15 @@ def _autofill_script(facts: dict[str, str]) -> str:
   const countedThisPass = new Set();
 
   function markNeedsLlm(el, reason) {{
-    if (isAbandoned(el)) return;
+    if (isAbandoned(el)) {{
+      if (!countedThisPass.has(el)) {{
+        countedThisPass.add(el);
+        result.abandoned += 1;
+        pushLimited(result.abandonedLabels, fieldSummary(el));
+      }}
+      recordOpenQuestion(el);
+      return;
+    }}
     // A deferred field is not interactive yet, so this pass was never an
     // attempt on it. Counting it would abandon a question before the agent
     // could reach it.
@@ -1124,7 +1140,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     const question = questionText(el);
     if (!question) return;
     if (result.openQuestions.some((item) => item.question === question)) return;
-    if (result.openQuestions.length >= 24) return;
+    if (result.openQuestions.length >= 100) return;
     result.openQuestions.push({{
       question,
       type: controlKind(el),
@@ -1426,6 +1442,21 @@ def _autofill_script(facts: dict[str, str]) -> str:
   function pickTextFact(el, text) {{
     text = preferPrimaryFieldText(el, text);
     const type = norm(el.type);
+    if (el.tagName === 'TEXTAREA') {{
+      // Never put short identity/contact facts into a long-answer box. A live
+      // Ashby form placed the phone number into "How did you hear about us?"
+      // because the broad label matcher also picked up the preceding Phone
+      // question. Only two deterministic long-answer rules are safe here;
+      // everything else is answered from Q&A or handed to the AI/user.
+      const question = norm(questionText(el)) || text;
+      if (has(question, ['how did you hear', 'hear about us', 'application source', 'candidate source'])) {{
+        return ['heard_about', facts.heard_about || 'LinkedIn'];
+      }}
+      if (has(question, ['why do you want to work', 'why are you interested', 'why this company', 'why join', 'interest in this role', 'interested in this role'])) {{
+        return ['interest_statement', facts.interest_statement];
+      }}
+      return [null, null];
+    }}
     const page = norm(location.href + ' ' + document.title);
     const preferExistingAccount = ['yes', 'true', '1'].includes(norm(facts.prefer_existing_account));
     const createAccountSurface = preferExistingAccount
@@ -2813,9 +2844,12 @@ def _submit_guard_script() -> str:
   const looksLikeApplicationPage = () => /\/apply\b|step=application|application/i.test(location.href);
   const looksLikeJobApplicationSurface = () => {
     const page = norm(document.body?.innerText || '');
-    return looksLikeApplicationPage()
+    const fields = allElements('input, textarea, select');
+    const hasActualForm = fields.filter((el) => visible(el)).length >= 2
+      || fields.some((el) => norm(el.getAttribute?.('type')) === 'file');
+    return (looksLikeApplicationPage() && hasActualForm)
       || (location.href.includes('ycombinator.com/companies') && hasAny(page, ['send message']))
-      || (hasAny(page, ['upload resume', 'resume']) && hasAny(page, ['linkedin', 'authorized to work', 'sponsorship']));
+      || (hasActualForm && hasAny(page, ['submit application', 'final review']));
   };
   const isDangerousSubmitLabel = (label) => {
     if (!label) return false;
@@ -2842,7 +2876,14 @@ def _submit_guard_script() -> str:
     window.__NO_FINAL_SUBMIT_GUARD.lastBlocked = blocked;
     return blocked;
   };
-  const finalSubmitAllowed = () => Number(window.__NO_FINAL_SUBMIT_GUARD?.allowUntil || 0) > Date.now();
+  const finalSubmitAllowed = () => {
+    let releasedForReview = !!window.__NO_FINAL_SUBMIT_GUARD?.released;
+    let pausedForUser = !!window.__LANGHIRE_PAUSE_CONTROL?.paused;
+    try { releasedForReview ||= sessionStorage.getItem('__langhireReviewReleased') === 'true'; } catch (_) {}
+    try { pausedForUser ||= sessionStorage.getItem('__langhireAiPaused') === 'true'; } catch (_) {}
+    return releasedForReview || pausedForUser
+      || Number(window.__NO_FINAL_SUBMIT_GUARD?.allowUntil || 0) > Date.now();
+  };
   const protectDangerousControls = () => {
     if (finalSubmitAllowed()) return 0;
     let disabled = 0;
@@ -2916,6 +2957,223 @@ def _submit_guard_script() -> str:
   result.blocked = window.__NO_FINAL_SUBMIT_GUARD?.lastBlocked || null;
   return result;
 })();
+"""
+
+
+def _release_review_handoff_script() -> str:
+    """Restore normal page interaction when automation hands control to a human."""
+    return r"""
+(() => {
+  const result = { controls: 0, finalSubmits: 0, observer: false };
+  const allElements = (selector, root = document, seen = new Set()) => {
+    const out = [];
+    if (!root || seen.has(root)) return out;
+    seen.add(root);
+    try { out.push(...Array.from(root.querySelectorAll(selector))); } catch (_) {}
+    let nodes = [];
+    try { nodes = Array.from(root.querySelectorAll('*')); } catch (_) {}
+    for (const node of nodes) {
+      if (node.shadowRoot) out.push(...allElements(selector, node.shadowRoot, seen));
+    }
+    return out;
+  };
+
+  try { sessionStorage.setItem('__langhireReviewReleased', 'true'); } catch (_) {}
+  window.__STATIC_AUTOFILL_LOCKS = {};
+  window.__STATIC_CHOICE_LOCKS = {};
+  if (window.__STATIC_CHOICE_CLICK_GUARD) window.__STATIC_CHOICE_CLICK_GUARD.bypass = true;
+
+  const automated = allElements(
+    '[data-static-autofilled], [data-static-choice-locked="true"], ' +
+    '[data-static-deferred="true"], [data-static-abandoned="true"]'
+  );
+  for (const el of automated) {
+    delete el.dataset.staticAutofilled;
+    delete el.dataset.staticChoiceLocked;
+    delete el.dataset.staticDeferred;
+    delete el.dataset.staticAbandoned;
+    delete el.dataset.staticUnresolvedPasses;
+    delete el.dataset.hybridNeedsLlm;
+    delete el.dataset.hybridNeedsLlmReason;
+    delete el.dataset.hybridRequiredEmpty;
+    try {
+      if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+      if (el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
+      if (el.getAttribute('tabindex') === '-1') el.removeAttribute('tabindex');
+    } catch (_) {}
+    result.controls += 1;
+  }
+
+  const guard = window.__NO_FINAL_SUBMIT_GUARD = window.__NO_FINAL_SUBMIT_GUARD || {};
+  guard.released = true;
+  guard.allowUntil = Number.MAX_SAFE_INTEGER;
+  try {
+    guard.observer?.disconnect?.();
+    result.observer = true;
+  } catch (_) {}
+
+  for (const el of allElements('[data-hybrid-final-submit-blocked="true"]')) {
+    delete el.dataset.hybridFinalSubmitBlocked;
+    if (el.getAttribute('title') === 'Blocked by LangHire dry-run final-submit guard') el.removeAttribute('title');
+    if (el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
+    if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+    if ('disabled' in el) el.disabled = false;
+    if (el.tagName === 'A' && el.dataset.originalHref && !el.href) el.href = el.dataset.originalHref;
+    result.finalSubmits += 1;
+  }
+  document.getElementById('__langhire-human-checkpoint')?.remove?.();
+  window.__LANGHIRE_PAUSE_CONTROL?.host?.remove?.();
+  try { sessionStorage.removeItem('__langhireAiPaused'); } catch (_) {}
+  return result;
+})();
+"""
+
+
+def _pause_control_overlay_script(force_paused: bool | None = None) -> str:
+    """Install the in-page Pause/Resume control used during AI cleanup."""
+    forced = "null" if force_paused is None else ("true" if force_paused else "false")
+    return rf"""
+(() => {{
+  const forced = {forced};
+  const storageKey = '__langhireAiPaused';
+  const allElements = (selector, root = document, seen = new Set()) => {{
+    const out = [];
+    if (!root || seen.has(root)) return out;
+    seen.add(root);
+    try {{ out.push(...Array.from(root.querySelectorAll(selector))); }} catch (_) {{}}
+    let nodes = [];
+    try {{ nodes = Array.from(root.querySelectorAll('*')); }} catch (_) {{}}
+    for (const node of nodes) if (node.shadowRoot) out.push(...allElements(selector, node.shadowRoot, seen));
+    return out;
+  }};
+  const stored = () => {{
+    try {{ return sessionStorage.getItem(storageKey) === 'true'; }} catch (_) {{ return false; }}
+  }};
+  const persist = (value) => {{
+    try {{ sessionStorage.setItem(storageKey, value ? 'true' : 'false'); }} catch (_) {{}}
+  }};
+
+  let control = window.__LANGHIRE_PAUSE_CONTROL;
+  if (!control) {{
+    control = window.__LANGHIRE_PAUSE_CONTROL = {{
+      paused: stored(),
+      userChanged: false,
+      updatedAt: Date.now(),
+      host: null,
+      panel: null,
+      button: null,
+      status: null,
+    }};
+
+    const unlockForUser = () => {{
+      if (window.__STATIC_CHOICE_CLICK_GUARD) window.__STATIC_CHOICE_CLICK_GUARD.bypass = true;
+      for (const el of allElements(
+        '[data-static-autofilled], [data-static-choice-locked="true"], ' +
+        '[data-static-deferred="true"], [data-static-abandoned="true"]'
+      )) {{
+        el.dataset.langhirePauseUnlocked = 'true';
+        if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+        if (el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
+        if (el.getAttribute('tabindex') === '-1') el.removeAttribute('tabindex');
+      }}
+      for (const el of allElements('[data-hybrid-final-submit-blocked="true"]')) {{
+        el.dataset.langhirePauseFinalSubmit = 'true';
+        delete el.dataset.hybridFinalSubmitBlocked;
+        if (el.getAttribute('title') === 'Blocked by LangHire dry-run final-submit guard') el.removeAttribute('title');
+        if (el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
+        if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+        if ('disabled' in el) el.disabled = false;
+        if (el.tagName === 'A' && el.dataset.originalHref && !el.href) el.href = el.dataset.originalHref;
+      }}
+    }};
+    const prepareForAutomation = () => {{
+      if (window.__STATIC_CHOICE_CLICK_GUARD) window.__STATIC_CHOICE_CLICK_GUARD.bypass = false;
+      for (const el of allElements('[data-langhire-pause-unlocked="true"]')) {{
+        delete el.dataset.langhirePauseUnlocked;
+        if (el.matches(
+          '[data-static-autofilled], [data-static-choice-locked="true"], ' +
+          '[data-static-deferred="true"], [data-static-abandoned="true"]'
+        )) {{
+          el.style.pointerEvents = 'none';
+          el.setAttribute('aria-disabled', 'true');
+          el.setAttribute('tabindex', '-1');
+        }}
+      }}
+      for (const el of allElements('[data-langhire-pause-final-submit="true"]')) {{
+        delete el.dataset.langhirePauseFinalSubmit;
+      }}
+    }};
+    const render = () => {{
+      if (control.button) control.button.textContent = control.paused ? 'Resume AI' : 'Pause AI';
+      if (control.status) {{
+        control.status.textContent = control.paused ? 'AI paused — page is yours' : 'AI is working';
+        control.status.style.color = control.paused ? '#166534' : '#475569';
+      }}
+      if (control.panel) {{
+        control.panel.style.background = control.paused ? 'rgba(240,253,244,.99)' : 'rgba(255,255,255,.98)';
+        control.panel.style.borderColor = control.paused ? '#16a34a' : '#94a3b8';
+        control.panel.style.boxShadow = control.paused
+          ? '0 10px 35px rgba(22,163,74,.35)'
+          : '0 8px 28px rgba(15,23,42,.25)';
+      }}
+      if (control.button) control.button.style.background = control.paused ? '#15803d' : '#111827';
+      if (control.host) control.host.style.opacity = '1';
+    }};
+    control.setPaused = (value, userChanged = false) => {{
+      control.paused = !!value;
+      control.userChanged = !!userChanged;
+      control.updatedAt = Date.now();
+      persist(control.paused);
+      if (control.paused) unlockForUser();
+      else prepareForAutomation();
+      render();
+      return control.snapshot();
+    }};
+    control.snapshot = () => ({{
+      installed: true,
+      paused: !!control.paused,
+      userChanged: !!control.userChanged,
+      updatedAt: Number(control.updatedAt || 0),
+      url: location.href,
+    }});
+
+    const mount = () => {{
+      if (control.host?.isConnected || !document.documentElement) return;
+      const host = document.createElement('div');
+      host.id = '__langhire-ai-control';
+      host.setAttribute('data-langhire-overlay', 'true');
+      host.style.cssText = 'position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:2147483647;opacity:0;';
+      const shadow = host.attachShadow({{ mode: 'closed' }});
+      const panel = document.createElement('div');
+      panel.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.97);border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 8px 28px rgba(15,23,42,.25);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#0f172a;';
+      const status = document.createElement('span');
+      status.style.cssText = 'white-space:nowrap;font-weight:600;';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('aria-label', 'LangHire pause or resume AI');
+      button.style.cssText = 'appearance:none;border:0;border-radius:8px;background:#111827;color:white;padding:8px 12px;font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;';
+      button.addEventListener('pointerdown', (event) => {{ event.stopPropagation(); }}, true);
+      button.addEventListener('click', (event) => {{
+        event.preventDefault();
+        event.stopPropagation();
+        control.setPaused(!control.paused, true);
+      }}, true);
+      panel.append(status, button);
+      shadow.append(panel);
+      document.documentElement.append(host);
+      control.host = host;
+      control.panel = panel;
+      control.button = button;
+      control.status = status;
+      render();
+    }};
+    mount();
+    if (!control.host) document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
+    control.setPaused(control.paused, false);
+  }}
+  if (forced !== null) control.setPaused(forced, false);
+  return control.snapshot();
+}})();
 """
 
 
@@ -4276,6 +4534,182 @@ async def run_static_autofill(
         result["resume_upload"] = upload
     result["human_checkpoint"] = await probe_workday_human_checkpoint(browser)
     return result
+
+
+async def release_review_handoff(browser: Any) -> dict[str, Any]:
+    """Remove automation-only locks before leaving a tab for manual review.
+
+    Static locks and the final-submit guard are useful while browser-use is
+    acting, but they must not survive the ownership handoff to the candidate.
+    """
+    result: dict[str, Any] = {"controls": 0, "finalSubmits": 0, "observer": False}
+    try:
+        cdp_session = await browser.get_or_create_cdp_session()
+        raw = await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={"expression": _release_review_handoff_script(), "returnByValue": True},
+            session_id=cdp_session.session_id,
+        )
+        value = (raw or {}).get("result", {}).get("value")
+        if isinstance(value, dict):
+            result.update(value)
+    except Exception as exc:
+        result["error"] = f"review_handoff_release_failed: {type(exc).__name__}: {str(exc)[:200]}"
+    return result
+
+
+async def set_ai_pause_control(browser: Any, paused: bool | None = None) -> dict[str, Any]:
+    """Install/probe the browser overlay, optionally forcing its pause state."""
+    try:
+        cdp_session = await browser.get_or_create_cdp_session()
+        raw = await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={
+                "expression": _pause_control_overlay_script(paused),
+                "returnByValue": True,
+            },
+            session_id=cdp_session.session_id,
+        )
+        value = (raw or {}).get("result", {}).get("value")
+        return value if isinstance(value, dict) else {"installed": False, "paused": False}
+    except Exception as exc:
+        return {
+            "installed": False,
+            "paused": False,
+            "error": f"pause_control_failed: {type(exc).__name__}: {str(exc)[:200]}",
+        }
+
+
+async def set_ai_pause_controls_for_tabs(
+    browser: Any,
+    target_ids: set[str] | list[str],
+    paused: bool | None = None,
+) -> list[dict[str, Any]]:
+    """Install/probe the pause control on each tab owned by the current job."""
+    results: list[dict[str, Any]] = []
+    installed_targets = getattr(browser, "_langhire_pause_init_targets", None)
+    if not isinstance(installed_targets, set):
+        installed_targets = set()
+        setattr(browser, "_langhire_pause_init_targets", installed_targets)
+
+    for target_id in list(dict.fromkeys(str(item) for item in target_ids if item)):
+        try:
+            cdp_session = await browser.get_or_create_cdp_session(target_id=target_id, focus=False)
+            if target_id not in installed_targets:
+                await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                    params={"source": _pause_control_overlay_script()},
+                    session_id=cdp_session.session_id,
+                )
+                installed_targets.add(target_id)
+            raw = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={
+                    "expression": _pause_control_overlay_script(paused),
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+            value = (raw or {}).get("result", {}).get("value")
+            result = value if isinstance(value, dict) else {"installed": False, "paused": False}
+            result["target_id"] = target_id
+            results.append(result)
+        except Exception as exc:
+            results.append(
+                {
+                    "target_id": target_id,
+                    "installed": False,
+                    "paused": False,
+                    "error": f"pause_control_failed: {type(exc).__name__}: {str(exc)[:200]}",
+                }
+            )
+    return results
+
+
+async def _focus_pause_target(browser: Any, target_id: str) -> None:
+    """Make the tab where Resume was clicked the agent's actual target."""
+    cdp_session = await browser.get_or_create_cdp_session(target_id=target_id, focus=True)
+    await cdp_session.cdp_client.send.Target.activateTarget(
+        params={"targetId": target_id},
+    )
+
+
+async def wait_while_ai_paused(
+    browser: Any,
+    cancel_flag: dict | None = None,
+    worker_id: int = 0,
+    target_ids: set[str] | None = None,
+    ignored_target_ids: set[str] | None = None,
+) -> bool:
+    """Wait until the user resumes from the in-browser control.
+
+    Returns True when an actual pause/resume cycle occurred. The pause state is
+    mirrored into the API status dictionary so the desktop UI and logs can
+    accurately report that the worker is intentionally idle.
+    """
+    if target_ids is None:
+        controls = [await set_ai_pause_control(browser)]
+    else:
+        ignored = ignored_target_ids or set()
+        try:
+            for tab in await browser.get_tabs():
+                target_id = str(getattr(tab, "target_id", "") or "")
+                if target_id and target_id not in ignored:
+                    target_ids.add(target_id)
+        except Exception:
+            pass
+        controls = await set_ai_pause_controls_for_tabs(browser, target_ids)
+    if not any(control.get("paused") for control in controls):
+        return False
+
+    if target_ids is not None:
+        await set_ai_pause_controls_for_tabs(browser, target_ids, True)
+
+    if cancel_flag is not None:
+        cancel_flag["paused"] = True
+    prefix = f"[W{worker_id}] " if worker_id else ""
+    print(f"  ⏸️  {prefix}AI paused by user; browser controls released")
+    while True:
+        if cancel_flag and cancel_flag.get("cancel_requested"):
+            return True
+        await asyncio.sleep(0.25)
+        if target_ids is None:
+            controls = [await set_ai_pause_control(browser)]
+        else:
+            ignored = ignored_target_ids or set()
+            try:
+                for tab in await browser.get_tabs():
+                    target_id = str(getattr(tab, "target_id", "") or "")
+                    if target_id and target_id not in ignored:
+                        target_ids.add(target_id)
+            except Exception:
+                pass
+            controls = await set_ai_pause_controls_for_tabs(browser, target_ids)
+
+        resumed_controls = [
+            item for item in controls
+            if item.get("installed") and item.get("userChanged") and not item.get("paused")
+        ]
+        if not resumed_controls:
+            # A new document defaults to unpaused. Only an explicit click on a
+            # visible Resume control is allowed to release a backend pause.
+            if target_ids is None:
+                await set_ai_pause_control(browser, True)
+            else:
+                await set_ai_pause_controls_for_tabs(browser, target_ids, True)
+            continue
+
+        resumed_control = max(resumed_controls, key=lambda item: int(item.get("updatedAt") or 0))
+        resumed_target_id = str(resumed_control.get("target_id") or "")
+        if resumed_target_id:
+            try:
+                await _focus_pause_target(browser, resumed_target_id)
+            except Exception:
+                pass
+        if target_ids is not None:
+            await set_ai_pause_controls_for_tabs(browser, target_ids, False)
+        break
+
+    if cancel_flag is not None:
+        cancel_flag["paused"] = False
+    print(f"  ▶️  {prefix}AI resumed by user")
+    return True
 
 
 async def try_safe_progress_step(browser: Any) -> dict[str, Any]:

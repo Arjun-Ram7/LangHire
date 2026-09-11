@@ -61,6 +61,9 @@ uv run python -m PyInstaller \
   --hidden-import pydantic_settings \
   --hidden-import psutil \
   --hidden-import yaml \
+  --hidden-import cli.apply_jobs \
+  --hidden-import cli.manual_review_queue \
+  --hidden-import cli.fapply_queue \
   --collect-all browser_use \
   --collect-all playwright \
   --clean \
@@ -91,4 +94,3 @@ if [ "$(uname -s)" = "Darwin" ]; then
     echo "⚠️  Entitlements.plist not found — skipping sidecar signing"
   fi
 fi
-

@@ -7,6 +7,9 @@ from playwright.sync_api import sync_playwright
 from backend.core.autofill_facts import (
     _age_from_dob,
     _autofill_script,
+    _pause_control_overlay_script,
+    _release_review_handoff_script,
+    _submit_guard_script,
     load_autofill_facts,
     _default_facts,
     _workday_human_checkpoint_script,
@@ -376,6 +379,121 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         self.assertNotIn("504ca500", joined)
         self.assertNotIn("card-field-input", joined)
         self.assertNotIn("Disability status", questions[-1] if questions else "")
+
+    def test_adjacent_phone_label_does_not_fill_a_textarea_with_phone(self):
+        # Ashby places labels beside field wrappers. The broad label matcher
+        # used to bleed "Phone" into the following long-answer box and put the
+        # candidate's phone number into an unrelated screening question.
+        result, values = self.run_fixture(
+            """
+            <div class="application-question">
+              <div class="application-label">Phone number</div>
+              <div class="application-field"><input id="phone" type="tel"></div>
+            </div>
+            <div class="application-question">
+              <div class="application-label">Tell us about a technical project you are proud of.</div>
+              <div class="application-field"><textarea id="project" required></textarea></div>
+            </div>
+            """
+        )
+
+        self.assertNotEqual(values["project"], "5555550123", result["debugInputs"])
+        self.assertEqual(values["project"], "", result["debugInputs"])
+        self.assertIn(
+            "Tell us about a technical project you are proud of.",
+            [item["question"] for item in result["openQuestions"]],
+        )
+
+    def test_abandoned_question_remains_reported_for_qna(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="application-question">
+                  <div class="application-label">Describe a difficult debugging problem.</div>
+                  <div class="application-field"><textarea id="debug" required></textarea></div>
+                </div>
+                """
+            )
+            result = {}
+            for _ in range(4):
+                result = page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertIn(
+                "Describe a difficult debugging problem.",
+                [item["question"] for item in result["openQuestions"]],
+            )
+            self.assertGreaterEqual(result["abandoned"], 1)
+        finally:
+            page.close()
+
+    def test_job_description_apply_is_not_blocked_as_final_submit(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <main>
+                  <h1>Embedded Software Internship</h1>
+                  <p>Apply with your resume. LinkedIn source.</p>
+                  <input aria-label="Search careers"><input aria-label="Email job alerts">
+                  <a id="apply" href="#application">Apply</a>
+                </main>
+                """
+            )
+            guard = page.evaluate(_submit_guard_script())
+            self.assertEqual(guard["disabled"], 0, guard)
+            page.locator("#apply").click()
+            self.assertEqual(page.evaluate("location.hash"), "#application")
+        finally:
+            page.close()
+
+    def test_manual_handoff_releases_static_and_submit_guards(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="first">First name</label><input id="first"></div>
+                <button id="submit">Submit application</button>
+                """
+            )
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            page.evaluate(_submit_guard_script())
+            self.assertEqual(page.locator("#first").get_attribute("aria-disabled"), "true")
+            self.assertTrue(page.locator("#submit").is_disabled())
+
+            released = page.evaluate(_release_review_handoff_script())
+
+            self.assertGreaterEqual(released["controls"], 1)
+            self.assertGreaterEqual(released["finalSubmits"], 1)
+            self.assertIsNone(page.locator("#first").get_attribute("aria-disabled"))
+            self.assertFalse(page.locator("#submit").is_disabled())
+        finally:
+            page.close()
+
+    def test_pause_overlay_temporarily_releases_and_restores_controls(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content(
+                """
+                <div class="field"><label for="first">First name</label><input id="first"></div>
+                <button id="submit">Submit application</button>
+                """
+            )
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            page.evaluate(_submit_guard_script())
+            page.evaluate(_pause_control_overlay_script(False))
+
+            paused = page.evaluate("window.__LANGHIRE_PAUSE_CONTROL.setPaused(true, true)")
+            self.assertTrue(paused["paused"])
+            self.assertIsNone(page.locator("#first").get_attribute("aria-disabled"))
+            self.assertFalse(page.locator("#submit").is_disabled())
+
+            resumed = page.evaluate("window.__LANGHIRE_PAUSE_CONTROL.setPaused(false, true)")
+            page.evaluate(_submit_guard_script())
+            self.assertFalse(resumed["paused"])
+            self.assertEqual(page.locator("#first").get_attribute("aria-disabled"), "true")
+            self.assertTrue(page.locator("#submit").is_disabled())
+        finally:
+            page.close()
 
     def test_workday_button_style_select_answers_worked_here_before(self):
         # matchesPreviouslyWorked only recognized "previously worked", "former

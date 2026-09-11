@@ -6,9 +6,10 @@ interface AutomationDialogProps {
   onConfirm: () => void;
   onCancel: () => void;
   reviewMode?: boolean;
+  fapplyMode?: boolean;
 }
 
-export default function AutomationDialog({ open, title, onConfirm, onCancel, reviewMode = false }: AutomationDialogProps) {
+export default function AutomationDialog({ open, title, onConfirm, onCancel, reviewMode = false, fapplyMode = false }: AutomationDialogProps) {
   if (!open) return null;
 
   return (
@@ -25,8 +26,14 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel, rev
           <div className="flex gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
             <Clock className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-amber-900">
-              <strong className="block mb-1">{reviewMode ? "Review-first automation" : "This may take a while"}</strong>
-              {reviewMode ? (
+              <strong className="block mb-1">{fapplyMode ? "Fapply-only autofill" : reviewMode ? "Review-first automation" : "This may take a while"}</strong>
+              {fapplyMode ? (
+                <>LangHire navigates to a verified application form and starts Fapply. Navigation is
+                deterministic first; its bounded AI can handle landing pages, sign-in/account creation,
+                and required terms, but stops typing as soon as the application form appears.
+                It verifies populated fields and skips to the next job after 60 seconds maximum.
+                It <strong>never submits</strong>.</>
+              ) : reviewMode ? (
                 <>LangHire fills deterministic fields first, then uses the AI only for navigation,
                 login, and unresolved questions. It will <strong>not submit</strong> the application.</>
               ) : (
@@ -39,10 +46,16 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel, rev
           <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
             <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-blue-900">
-              <strong className="block mb-1">First-time login required</strong>
-              On the first run, the browser will open LinkedIn and Google login pages.
-              You'll need to <strong>log in manually</strong> once — after that, your session cookies
-              are saved and future runs will log in automatically.
+              <strong className="block mb-1">First-time login may be required</strong>
+              {fapplyMode ? (
+                <>Fapply runs in LangHire's isolated browser profile. If its panel says Sign In,
+                <strong> sign in once in that browser</strong>, then retry the job. No Fapply credit is
+                used until “Start AI Autofill” is available.</>
+              ) : (
+                <>On the first run, the browser will open LinkedIn and Google login pages.
+                You'll need to <strong>log in manually</strong> once — after that, your session cookies
+                are saved and future runs will log in automatically.</>
+              )}
             </div>
           </div>
 
@@ -50,7 +63,10 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel, rev
             <AlertTriangle className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
             <div className="text-sm text-foreground">
               <strong className="block mb-1">Keep the browser window open</strong>
-              {reviewMode ? (
+              {fapplyMode ? (
+                <>Each verified application tab stays open for your review. Landing pages are closed,
+                and jobs with no verified Fapply field changes are marked failed instead of silently skipped.</>
+              ) : reviewMode ? (
                 <>A Chromium window will appear. Stuck and completed-review tabs stay open while
                 LangHire advances to the next job. Only interact when a login needs you.</>
               ) : (

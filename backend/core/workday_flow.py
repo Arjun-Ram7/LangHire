@@ -20,25 +20,35 @@ try:
     import core.shared_config as config
     from core.shared_config import LOGS_DIR
     from core.autofill_facts import (
+        _pause_control_overlay_script,
         _submit_guard_script,
         format_facts_for_prompt,
         probe_workday_human_checkpoint,
+        release_review_handoff,
         run_static_autofill,
+        set_ai_pause_control,
+        set_ai_pause_controls_for_tabs,
         try_controlled_final_submit,
         try_safe_progress_step,
         wait_for_workday_human_checkpoint,
+        wait_while_ai_paused,
     )
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
     from backend.core.autofill_facts import (
+        _pause_control_overlay_script,
         _submit_guard_script,
         format_facts_for_prompt,
         probe_workday_human_checkpoint,
+        release_review_handoff,
         run_static_autofill,
+        set_ai_pause_control,
+        set_ai_pause_controls_for_tabs,
         try_controlled_final_submit,
         try_safe_progress_step,
         wait_for_workday_human_checkpoint,
+        wait_while_ai_paused,
     )
 
 
@@ -144,7 +154,7 @@ async def _pause_for_workday_human_click(
 # A click followed by a couple of waits can legitimately leave the DOM
 # unchanged while a cross-site application opens. Six identical post-step
 # states gives Gemini five real recovery attempts before deterministic handoff.
-_GEMINI_LOOP_REPEAT_LIMIT = 6
+_GEMINI_LOOP_REPEAT_LIMIT = 3
 _LOOP_STOP_MARKERS = (
     "loop detected",
     "loop_detection",
@@ -213,7 +223,7 @@ def _summarize_review(review: dict) -> dict:
         "needs_llm": (review.get("needsLlm") or [])[:8],
         "abandoned": int(review.get("abandoned") or 0),
         "abandoned_labels": (review.get("abandonedLabels") or [])[:8],
-        "open_questions": (review.get("openQuestions") or [])[:24],
+        "open_questions": (review.get("openQuestions") or [])[:100],
         "required_empty_labels": (review.get("requiredEmptyLabels") or [])[:8],
         "visible_errors": (review.get("visibleErrors") or [])[:8],
         "matches": (review.get("matches") or [])[:24],
@@ -271,9 +281,14 @@ def _surface_is_external_application(summary: dict) -> bool:
 
 def _can_run_llm_cleanup(summary: dict, preflight: dict) -> bool:
     """Allow Gemini on an ATS surface or as the promised LinkedIn fallback."""
+    surface = summary.get("surface") or {}
+    # External ATS account/sign-in pages are part of the application flow. The
+    # cleanup agent gets a bounded attempt using configured credentials and
+    # required terms; OTP/CAPTCHA/rejected credentials remain human stops.
+    if surface.get("accountish"):
+        return _surface_is_external_application(summary)
     if _surface_is_external_application(summary):
         return True
-    surface = summary.get("surface") or {}
     url = str(summary.get("url") or surface.get("url") or "").lower()
     if "linkedin.com" not in url:
         return bool(surface.get("accountish"))
@@ -288,7 +303,29 @@ def _can_run_llm_cleanup(summary: dict, preflight: dict) -> bool:
     # Preflight deliberately avoids risky/ambiguous controls. When it cannot
     # reach Apply, vision-based Gemini must get a bounded attempt instead of us
     # silently leaving the job on LinkedIn.
-    return not bool(preflight.get("clicked_linkedin")) or bool(surface.get("accountish"))
+    return not bool(preflight.get("clicked_linkedin"))
+
+
+def _application_tab_score(url: str, title: str = "", company: str = "") -> int:
+    """Rank a spawned tab as a likely continuation of this application."""
+    lowered_url = str(url or "").lower()
+    lowered_title = str(title or "").lower()
+    if not lowered_url or lowered_url.startswith(("about:", "chrome:", "brave:")):
+        return -100
+    score = 0
+    if any(marker in lowered_url for marker in ("/job/apply", "/apply/", "/apply?", "/resume/", "application")):
+        score += 8
+    if any(marker in lowered_url for marker in (
+        "greenhouse.io", "lever.co", "workday", "successfactors", "ashbyhq",
+        "jobvite", "icims", "smartrecruiters", "oraclecloud", "jobs.", "careers.",
+    )):
+        score += 4
+    company_tokens = [token for token in str(company or "").lower().replace("-", " ").split() if len(token) >= 4]
+    if any(token in lowered_url or token in lowered_title for token in company_tokens):
+        score += 5
+    if "linkedin.com" in lowered_url:
+        score -= 3
+    return score
 
 
 def _safe_submit_summary_blockers(summary: dict) -> list[str]:
@@ -552,6 +589,7 @@ async def _static_fill_passes(
     resume_path: str,
     passes: int,
     worker_id: int,
+    cancel_flag: dict | None = None,
 ) -> dict:
     review: dict = {}
     safe_progress: list[dict] = []
@@ -559,6 +597,9 @@ async def _static_fill_passes(
     seen_progress_clicks: dict[str, int] = {}
     last_surface: dict = {}
     for idx in range(max(1, passes)):
+        await wait_while_ai_paused(browser, cancel_flag, worker_id)
+        if cancel_flag and cancel_flag.get("cancel_requested"):
+            break
         last_surface = await _wait_for_visible_surface(browser, timeout=12.0 if idx == 0 else 5.0)
         review = await run_static_autofill(
             browser,
@@ -628,6 +669,9 @@ async def _static_fill_passes(
             })
             break
 
+        await wait_while_ai_paused(browser, cancel_flag, worker_id)
+        if cancel_flag and cancel_flag.get("cancel_requested"):
+            break
         progress = await try_safe_progress_step(browser)
         progress_entry = {
             "clicked": bool(progress.get("clicked")),
@@ -755,6 +799,7 @@ async def _run_llm_cleanup(
     max_steps: int,
     timeout: float,
     cancel_flag: dict | None = None,
+    ignored_target_ids: set[str] | None = None,
 ) -> dict:
     """Bounded Gemini/browser-use cleanup for fields static autofill could not finish."""
     if max_steps <= 0 or timeout <= 0:
@@ -772,6 +817,75 @@ async def _run_llm_cleanup(
     }
     previous_issue_sig = ""
     consecutive_issue_repeats = 0
+    pause_active = False
+    ignored_tabs = set(ignored_target_ids or set())
+    owned_tabs: set[str] = set()
+    initial_tabs = await browser.get_tabs()
+    current_target_id = str(getattr(browser, "agent_focus_target_id", "") or "")
+    if current_target_id:
+        owned_tabs.add(current_target_id)
+    for tab in initial_tabs:
+        target_id = str(getattr(tab, "target_id", "") or "")
+        if target_id and target_id not in ignored_tabs:
+            owned_tabs.add(target_id)
+
+    async def adopt_application_tabs() -> None:
+        """Follow popup tabs opened by Apply/Create Account/Continue actions."""
+        try:
+            tabs = await browser.get_tabs()
+        except Exception:
+            return
+        candidates = []
+        focused_target_id = str(getattr(browser, "agent_focus_target_id", "") or "")
+        focused_score = -100
+        for index, tab in enumerate(tabs):
+            target_id = str(getattr(tab, "target_id", "") or "")
+            if not target_id or target_id in ignored_tabs:
+                continue
+            owned_tabs.add(target_id)
+            score = _application_tab_score(
+                str(getattr(tab, "url", "") or ""),
+                str(getattr(tab, "title", "") or ""),
+                company,
+            )
+            if target_id == focused_target_id:
+                focused_score = score
+                continue
+            if score > 0:
+                candidates.append((score, index, target_id))
+        if candidates and max(candidates)[0] > focused_score:
+            _, _, target_id = max(candidates)
+            cdp_session = await browser.get_or_create_cdp_session(target_id=target_id, focus=True)
+            await cdp_session.cdp_client.send.Target.activateTarget(
+                params={"targetId": target_id},
+            )
+            print(f"  🗂️  [W{worker_id}] Switched AI to newly opened application tab")
+        if owned_tabs:
+            await set_ai_pause_controls_for_tabs(browser, owned_tabs)
+
+    async def wait_for_user_resume() -> None:
+        """Hold the agent between steps while the browser overlay is paused."""
+        nonlocal pause_active
+        await adopt_application_tabs()
+        controls = await set_ai_pause_controls_for_tabs(browser, owned_tabs)
+        pause_active = any(control.get("paused") for control in controls)
+        if not pause_active:
+            return
+        resumed = await wait_while_ai_paused(
+            browser,
+            cancel_flag,
+            worker_id,
+            target_ids=owned_tabs,
+            ignored_target_ids=ignored_tabs,
+        )
+        pause_active = False
+        if resumed and not (cancel_flag and cancel_flag.get("cancel_requested")):
+            await run_static_autofill(
+                browser,
+                facts,
+                resume_path=resume_path,
+                guard_final_submit=True,
+            )
 
     sensitive_data = {
         "email": facts.get("email", ""),
@@ -786,6 +900,7 @@ async def _run_llm_cleanup(
     async def on_step(_browser_state, _agent_output, _step_num):
         nonlocal previous_issue_sig, consecutive_issue_repeats
         state["steps"] += 1
+        await wait_for_user_resume()
         review = await run_static_autofill(
             browser,
             facts,
@@ -843,11 +958,6 @@ async def _run_llm_cleanup(
                 "errors": (review.get("visibleErrors") or [])[:5],
                 "needs": (review.get("needsLlm") or [])[:5],
                 "invalid": int(review.get("invalidFields") or 0),
-                # A stable page is not a loop if Gemini has switched strategy.
-                # This prevents a newly discovered modal/Apply Manually action
-                # from being stopped just because the URL and blank fields did
-                # not change yet.
-                "action": _agent_action_signature(_agent_output),
             },
             sort_keys=True,
         )
@@ -864,6 +974,7 @@ async def _run_llm_cleanup(
             )
 
     async def should_stop():
+        await wait_for_user_resume()
         if cancel_flag and cancel_flag.get("cancel_requested"):
             state["stop_reason"] = "application queue cancelled by user"
         return bool(state.get("stop_reason"))
@@ -872,17 +983,18 @@ async def _run_llm_cleanup(
         "BOUNDED CLEANUP MODE. Continue from the current browser tab only. Do not navigate back to LinkedIn unless "
         "the current page is blank, broken, or unrelated.\n"
         f"EXPECTED_JOB: {title} at {company}\n\n"
-        "Goal: try hard to complete the visible application/login/account/form flow until the final review/submit point, then STOP with the tab open. "
+        "Goal: complete the visible application form until the final review/submit point, then STOP with the tab open. "
         "Do not submit or send the final application.\n\n"
         "Order of operations:\n"
         "1. Let the static autofill layer handle common fields first. It runs after every step.\n"
         "1a. If the current page is still the expected LinkedIn job, inspect it with vision, click its Apply or Easy Apply "
-        "control once, and continue into the application. If LinkedIn shows a login wall, attempt the visible login flow "
-        "before declaring the job stuck. Do not browse to a different job.\n"
-        "2. Handle account creation and login pages when required. Use <secret>account_email</secret> and "
-        "<secret>password</secret> for external ATS account creation/login. If confirm password appears, use the same password.\n"
-        "2a. If a 'LangHire paused' banner appears on Workday, take no action. The runner has frozen you while the "
-        "user performs the protected Create Account/Sign In click and will resume automatically.\n"
+        "control once, and continue into the application. Do not browse to a different job.\n"
+        "2. On the expected employer/ATS domain, handle the normal account gate before the application: choose email login "
+        "when offered, fill account_email and password, accept required terms/privacy checkboxes, and click Create Account "
+        "or Sign In. Give the same unchanged account action at most two attempts. Never create or sign into an unrelated "
+        "site, reset a password, send a recovery email, or change the configured credentials.\n"
+        "2a. The top-center LangHire 'Pause AI'/'Resume AI' panel belongs only to the user. Never click it and ignore "
+        "its text when reasoning about the application. If it says AI paused, the runner will freeze you automatically.\n"
         "3. For Workday/Greenhouse/Lever/Ashby/SuccessFactors/Oracle/iCIMS-style pages, choose manual/guest apply when available. "
         "Avoid resume-autofill shortcuts like Use My Last Application or Autofill with Resume.\n"
         "4. Fill only fields still blank after static autofill. Do not rewrite fields that already contain static values.\n"
@@ -899,14 +1011,14 @@ async def _run_llm_cleanup(
         "Leave one blank only if it asks for something the facts genuinely do not support.\n"
         "5. If a location/autocomplete field rejects free text, clear it once, type the location, then select the matching dropdown option.\n"
         "6. If a privacy/terms dialog appears, read it and click Accept/Agree only. Never click Decline/Reject.\n"
-        "7. Click non-final Next/Continue/Create Account/Start Application buttons only after visible required blanks are handled.\n"
+        "7. Click non-final Next/Continue/Start Application buttons only after visible required blanks are handled.\n"
         "8. Continue through multi-page forms by pressing safe Next/Continue buttons after each page is filled. "
         "Never click Submit, Submit application, Send application, Finish application, Complete application, or any final apply/send button. "
         "If that is the only remaining action, call done(success=true) and leave the tab open.\n\n"
         "Loop and timeout rules:\n"
         "- Do not try the same failed click or same text field more than twice.\n"
         "- If a field already shows a value, that counts as done — do not click it again to \"double check\" it.\n"
-        "- If you are stuck on one field, dropdown, login, privacy dialog, or page for more than 5 steps, skip it and move to "
+        "- If you are stuck on one field, dropdown, privacy dialog, or page for more than 5 steps, skip it and move to "
         "the next field if the page allows it; only call done(success=false) if skipping is not possible (e.g. it blocks all further fields).\n"
         "- If a verification code/OTP/2FA/email confirmation is requested, call done(success=false). Do not open email and do not guess.\n"
         "- If credentials are rejected, call done(success=false). Do not reset passwords or send recovery emails.\n\n"
@@ -926,8 +1038,10 @@ async def _run_llm_cleanup(
         # max_actions_per_step no longer needs to carry that burden.
         try:
             await browser._cdp_add_init_script(_submit_guard_script())
+            await browser._cdp_add_init_script(_pause_control_overlay_script())
+            await set_ai_pause_control(browser, False)
         except Exception as exc:
-            print(f"  ⚠️  [W{worker_id}] Could not install proactive submit guard: {type(exc).__name__}: {exc}")
+            print(f"  ⚠️  [W{worker_id}] Could not install proactive browser controls: {type(exc).__name__}: {exc}")
         llm = config.get_llm()
         # gemini-2.5-flash-lite has been observed returning malformed JSON
         # mid-run (a Pydantic validation error on AgentOutput), which
@@ -985,7 +1099,24 @@ async def _run_llm_cleanup(
             register_new_step_callback=on_step,
             register_should_stop_callback=should_stop,
         )
-        result = await asyncio.wait_for(agent.run(max_steps=max_steps), timeout=timeout)
+        # Count only active automation time. A user can leave the overlay
+        # paused as long as needed without the cleanup timeout killing the run.
+        agent_task = asyncio.create_task(agent.run(max_steps=max_steps))
+        active_elapsed = 0.0
+        last_tick = asyncio.get_event_loop().time()
+        while True:
+            done, _ = await asyncio.wait({agent_task}, timeout=0.25)
+            now = asyncio.get_event_loop().time()
+            if not pause_active:
+                active_elapsed += now - last_tick
+            last_tick = now
+            if agent_task in done:
+                result = agent_task.result()
+                break
+            if active_elapsed >= timeout:
+                agent_task.cancel()
+                await asyncio.gather(agent_task, return_exceptions=True)
+                raise asyncio.TimeoutError
         try:
             state["success"] = _cleanup_succeeded(
                 bool(result.is_successful()), state.get("last_review")
@@ -1039,6 +1170,8 @@ async def _run_llm_cleanup(
             state["stop_reason"] = f"cleanup stopped; final static scan unavailable: {type(exc).__name__}"
         if not state.get("last_review"):
             state["last_review"] = {"error": f"final_static_scan_failed: {type(exc).__name__}: {str(exc)[:200]}"}
+    if cancel_flag is not None:
+        cancel_flag["paused"] = False
     return state
 
 

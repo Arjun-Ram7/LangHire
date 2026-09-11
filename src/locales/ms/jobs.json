@@ -22,7 +22,7 @@
     "sourcePlatform": "Platform Sumber",
     "jobTitlePlaceholder": "Jawatan (cth. 'Penganalisis Data') atau kosongkan untuk semua",
     "maxJobsPlaceholder": "Maks kerja",
-    "maxJobsTitle": "Maks kerja untuk dikumpul (setiap jawatan)",
+    "maxJobsTitle": "Jumlah maksimum kerja untuk dikumpul (merentas semua jawatan)",
     "stop": "Berhenti",
     "start": "Mula",
     "startingCollection": "Memulakan pengumpulan...",

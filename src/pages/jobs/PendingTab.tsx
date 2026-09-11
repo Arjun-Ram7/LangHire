@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   Briefcase,
   Search,
@@ -21,6 +23,7 @@ import {
   ChevronRight,
   Sparkles,
   Send,
+  Download,
 } from "lucide-react";
 import {
   getJobs,
@@ -96,6 +99,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [exportingJobs, setExportingJobs] = useState(false);
+  const [jobListSaved, setJobListSaved] = useState(false);
 
   // Apply state
   const [applyingUrl, setApplyingUrl] = useState<string | null>(null);
@@ -240,7 +245,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       const res = await startApplying({
         job_url: pendingApplyUrl,
         workers: 1,
-        mode: "review",
+        mode: "fapply",
       });
       if (!res.success) {
         alert(res.message);
@@ -317,8 +322,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     (j) =>
       j.status === "pending" ||
       j.status === "failed" ||
-      j.status === "manual_review" ||
-      j.status === "blocked"
+      j.status === "manual_review"
   );
   const allSelectableSelected =
     selectableJobs.length > 0 &&
@@ -349,7 +353,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       const res = await startApplying({
         job_urls: [...selectedJobs],
         workers: 1,
-        mode: "review",
+        mode: "fapply",
       });
       if (!res.success) {
         alert(res.message);
@@ -375,6 +379,34 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       onJobsChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to delete jobs");
+    }
+  };
+
+  const handleDownloadJobList = async () => {
+    if (jobs.length === 0) return;
+    setExportingJobs(true);
+    setJobListSaved(false);
+    try {
+      const clean = (value: string | undefined, fallback: string) =>
+        (value || fallback).replace(/\s+/g, " ").trim();
+      const lines = jobs.map(
+        (job, index) =>
+          `${index + 1}. ${clean(job.company, "Unknown company")} — ${clean(job.title, "Untitled role")}`
+      );
+      const contents = [`LangHire Jobs (${jobs.length})`, "", ...lines, ""].join("\n");
+      const filename = `langhire-jobs-${new Date().toISOString().slice(0, 10)}.txt`;
+      const path = await save({
+        defaultPath: filename,
+        filters: [{ name: "Text file", extensions: ["txt"] }],
+      });
+      if (!path) return;
+      await invoke("write_text_file", { path, contents });
+      setJobListSaved(true);
+      window.setTimeout(() => setJobListSaved(false), 3000);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to save job list");
+    } finally {
+      setExportingJobs(false);
     }
   };
 
@@ -575,16 +607,35 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         </div>
       </form>
 
-      {/* Select All Toggle */}
-      {!loading && jobs.length > 0 && selectableJobs.length > 0 && (
-        <div className="flex items-center gap-2 mb-3">
+      {/* List actions */}
+      {!loading && jobs.length > 0 && (
+        <div className="flex items-center justify-between gap-3 mb-3">
+          {selectableJobs.length > 0 ? (
+            <button
+              onClick={toggleSelectAll}
+              className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <CheckSquare className="w-4 h-4" />
+              {allSelectableSelected ? "Deselect All" : "Select All"} (
+              {selectableJobs.length})
+            </button>
+          ) : (
+            <span />
+          )}
           <button
-            onClick={toggleSelectAll}
-            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            onClick={handleDownloadJobList}
+            disabled={exportingJobs}
+            className="btn-secondary !py-1.5"
+            title="Download the currently displayed companies and roles as a text file"
           >
-            <CheckSquare className="w-4 h-4" />
-            {allSelectableSelected ? "Deselect All" : "Select All"} (
-            {selectableJobs.length})
+            {exportingJobs ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : jobListSaved ? (
+              <CheckCircle className="w-4 h-4" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {jobListSaved ? "Saved" : `Download List (${jobs.length})`}
           </button>
         </div>
       )}
@@ -619,8 +670,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             const isSelectable =
               job.status === "pending" ||
               job.status === "failed" ||
-              job.status === "manual_review" ||
-              job.status === "blocked";
+              job.status === "manual_review";
             const hasTailoredResume = !!job.tailored_resume_path;
             const isExpanded = expandedJob === job.url;
             return (
@@ -700,7 +750,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                         <StatusIcon className="w-3 h-3" />{" "}
                         {STATUS_LABELS[job.status] || STATUS_LABELS.pending}
                       </span>
-                      {(job.status === "pending" || job.status === "failed") && (
+                      {(job.status === "pending" ||
+                        job.status === "failed" ||
+                        job.status === "manual_review") && (
                         <>
                           <button
                             onClick={() => handleGenerateCoverLetter(job)}
@@ -727,10 +779,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                               <Play className="w-3 h-3" />
                             )}
                             {applyingUrl === job.url
-                              ? "Preparing…"
+                              ? "Opening & filling…"
                               : job.status === "failed"
-                              ? "Retry preparation"
-                              : "Prepare"}
+                              ? "Retry Fapply"
+                              : "Fapply Autofill"}
                           </button>
                         </>
                       )}
@@ -905,7 +957,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             ) : (
               <Play className="w-4 h-4" />
             )}
-            Prepare {selectedJobs.size} application{selectedJobs.size > 1 ? "s" : ""}
+            Autofill {selectedJobs.size} application{selectedJobs.size > 1 ? "s" : ""}
           </button>
           <button
             onClick={handleBatchTailor}
@@ -933,8 +985,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
       <AutomationDialog
         open={showConfirmDialog}
-        title="Prepare application for review"
-        reviewMode
+        title="Open application and run Fapply"
+        fapplyMode
         onConfirm={confirmApplySingle}
         onCancel={() => {
           setShowConfirmDialog(false);

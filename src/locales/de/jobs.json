@@ -22,7 +22,7 @@
     "sourcePlatform": "Quellplattform",
     "jobTitlePlaceholder": "Jobtitel (z.B. 'Data Analyst') oder leer lassen für alle",
     "maxJobsPlaceholder": "Max. Jobs",
-    "maxJobsTitle": "Max. zu sammelnde Jobs (pro Titel)",
+    "maxJobsTitle": "Maximale Gesamtzahl der zu sammelnden Jobs (über alle Titel hinweg)",
     "stop": "Stopp",
     "start": "Start",
     "startingCollection": "Sammlung wird gestartet...",
