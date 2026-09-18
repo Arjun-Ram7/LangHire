@@ -62,7 +62,17 @@ async def lifespan(app: FastAPI):
     _ensure_chromium_async()
     # Start parent-process watchdog (self-terminate if Tauri app dies)
     _start_parent_watchdog()
+    # Keep the Pause/Resume AI control on every automation-browser tab, run or no run
+    try:
+        from core.assist_watcher import AssistWatcher
+    except ImportError:
+        from backend.core.assist_watcher import AssistWatcher
+    assist_watcher = AssistWatcher(
+        is_busy=lambda: any(s.get("running") for s in (_collection_status, _visa_screen_status, _apply_status))
+    )
+    assist_task = asyncio.create_task(assist_watcher.run_forever())
     yield
+    assist_task.cancel()
     # Graceful shutdown: stop running operations
     import traceback
     _log.info(f"Backend shutting down... (trigger: lifespan exit)")
