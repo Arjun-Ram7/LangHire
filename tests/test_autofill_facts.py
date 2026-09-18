@@ -1830,3 +1830,47 @@ class HumanCheckpointNotificationTests(unittest.IsolatedAsyncioTestCase):
         script = next(call[2] for call in calls if call[0] == "osascript")
         self.assertNotIn("frontmost", script)
         self.assertIn("display notification", script)
+
+
+class PauseControlOverlayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    def test_a_removed_overlay_is_mounted_again_the_next_time_the_script_runs(self):
+        # The end-of-run handoff removes the panel. The watcher re-runs this script on every
+        # tab to keep Pause/Resume AI available afterwards, but the panel was only ever
+        # mounted when the control object was first created, so it never came back.
+        page = self.browser.new_page()
+        try:
+            page.set_content("<body><p>application</p></body>")
+            page.evaluate(_pause_control_overlay_script())
+            self.assertTrue(page.evaluate("() => !!document.getElementById('__langhire-ai-control')"))
+
+            page.evaluate("() => window.__LANGHIRE_PAUSE_CONTROL.host.remove()")
+            self.assertFalse(page.evaluate("() => !!document.getElementById('__langhire-ai-control')"))
+
+            page.evaluate(_pause_control_overlay_script())
+            self.assertTrue(page.evaluate("() => !!document.getElementById('__langhire-ai-control')"))
+            self.assertEqual(page.evaluate("() => document.querySelectorAll('#__langhire-ai-control').length"), 1)
+        finally:
+            page.close()
+
+    def test_running_the_script_again_keeps_a_single_panel_and_the_current_state(self):
+        page = self.browser.new_page()
+        try:
+            page.set_content("<body></body>")
+            page.evaluate(_pause_control_overlay_script(True))
+            page.evaluate(_pause_control_overlay_script())
+            page.evaluate(_pause_control_overlay_script())
+
+            self.assertEqual(page.evaluate("() => document.querySelectorAll('#__langhire-ai-control').length"), 1)
+            self.assertTrue(page.evaluate("() => window.__LANGHIRE_PAUSE_CONTROL.paused"))
+        finally:
+            page.close()

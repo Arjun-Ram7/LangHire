@@ -3198,10 +3198,14 @@ def _pause_control_overlay_script(force_paused: bool | None = None) -> str:
       control.status = status;
       render();
     }};
+    control.mount = mount;
     mount();
     if (!control.host) document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
     control.setPaused(control.paused, false);
   }}
+  // The end-of-run handoff removes the panel; mount() is a no-op while it is attached, so every
+  // later evaluation puts it back and Pause/Resume AI stays available on the page.
+  control.mount?.();
   if (forced !== null) control.setPaused(forced, false);
   return control.snapshot();
 }})();

@@ -22,7 +22,7 @@ try:
     )
     from core.config import load_profile
     from core.shared_config import RESUME_PATH
-    from core.workday_flow import _static_fill_passes, is_workday_url, run_workday_deterministic
+    from core.workday_flow import fill_current_page
 except ImportError:
     from backend.core.autofill_facts import (
         _automation_browser_pid,
@@ -33,7 +33,7 @@ except ImportError:
     )
     from backend.core.config import load_profile
     from backend.core.shared_config import RESUME_PATH
-    from backend.core.workday_flow import _static_fill_passes, is_workday_url, run_workday_deterministic
+    from backend.core.workday_flow import fill_current_page
 
 
 def plan_tab_action(state: dict[str, Any] | None) -> str:
@@ -74,17 +74,11 @@ async def _connect() -> BrowserSession | None:
 
 
 async def _assist(browser: BrowserSession, target_id: str, url: str) -> None:
-    """One autofill pass on the tab where Resume AI was pressed, stopping before any final submit."""
+    """Fill the tab where Resume AI was pressed. It fills; the candidate keeps control of navigation."""
     await _focus_pause_target(browser, target_id)
     profile = load_profile()
     facts = load_autofill_facts(profile, RESUME_PATH)
-    if is_workday_url(url):
-        await run_workday_deterministic(
-            browser, facts=facts, resume_path=RESUME_PATH, worker_id=0,
-            passes=12, llm_cleanup=False, profile=profile,
-        )
-    else:
-        await _static_fill_passes(browser, facts, RESUME_PATH, 6, 0, profile=profile)
+    await fill_current_page(browser, facts, RESUME_PATH, profile)
     await release_review_handoff(browser)
 
 

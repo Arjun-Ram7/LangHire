@@ -15,6 +15,7 @@ from backend.core.workday_flow import (
     _fill_deterministic_widgets,
     _fill_experience_step,
     _static_fill_passes,
+    fill_current_page,
 )
 
 
@@ -372,6 +373,27 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
         ):
             await _static_fill_passes(object(), {}, '', 12, 1)
         self.assertLessEqual(advance.await_count, 5)
+
+    async def test_fill_current_page_fills_twice_in_order_and_never_clicks_continue(self):
+        # Backs the "Resume AI" control on a page the candidate came back to: fill what is
+        # blank, leave navigation to them.
+        order = []
+        async def widgets(*args, **kwargs):
+            order.append('widgets')
+        async def static(*args, **kwargs):
+            order.append('static')
+            return {'url': 'u'}
+        with (
+            patch('backend.core.workday_flow._probe_visible_surface', new=AsyncMock(return_value={'step': 'My Experience'})),
+            patch('backend.core.workday_flow._fill_deterministic_widgets', side_effect=widgets) as fill,
+            patch('backend.core.workday_flow.run_static_autofill', side_effect=static),
+            patch('backend.core.workday_flow.try_safe_progress_step', new=AsyncMock()) as advance,
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            await fill_current_page(object(), {'a': 'b'}, '/tmp/r.pdf', {'p': 1})
+        self.assertEqual(order, ['widgets', 'static', 'widgets', 'static'])
+        self.assertEqual(fill.await_args.args[5], 'My Experience')
+        advance.assert_not_awaited()
 
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}

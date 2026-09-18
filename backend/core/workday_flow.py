@@ -644,6 +644,26 @@ async def _fill_deterministic_widgets(
             print(f"    ⚠️  [W{worker_id}] {label} fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
+async def fill_current_page(
+    browser: BrowserSession,
+    facts: dict,
+    resume_path: str,
+    profile: dict | None,
+    worker_id: int = 0,
+) -> None:
+    """Fill what is blank on the page the candidate is looking at, without moving on.
+
+    Backs the Resume AI control on an application they came back to check. Two rounds because the
+    second sees what the first opened (a new row, a dependent question); the final-submit guard stays.
+    """
+    step = str((await _probe_visible_surface(browser)).get("step") or "")
+    counters: dict = {}
+    for _ in range(2):
+        await _fill_deterministic_widgets(browser, facts, resume_path, worker_id, profile, step, counters)
+        await run_static_autofill(browser, facts, resume_path=resume_path, guard_final_submit=True)
+        await asyncio.sleep(0.6)
+
+
 async def _static_fill_passes(
     browser: BrowserSession,
     facts: dict,
