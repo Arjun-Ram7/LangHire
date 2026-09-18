@@ -310,6 +310,21 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             experience.assert_awaited_once()
         self.assertEqual(calls, ['dates', 'phone', 'dates', 'phone'])
 
+    async def test_known_workday_question_answers_are_filled_before_the_ai_is_asked(self):
+        # Live run: the static pass could not open Workday's listbox buttons, reported the
+        # questions blank, and the AI (out of credits) then abandoned the job.
+        seen = []
+        async def questions(browser, facts, worker_id=0):
+            seen.append((dict(facts), worker_id))
+            return 0
+        with (
+            patch('backend.core.workday_flow.fill_workday_questions', side_effect=questions),
+            patch('backend.core.workday_flow.fill_signature_dates', new=AsyncMock()),
+            patch('backend.core.workday_flow.fill_phone_device_type', new=AsyncMock()),
+        ):
+            await _fill_deterministic_widgets(object(), {'age_over_18': 'yes'}, '', 3, {}, 'Application Questions', {})
+        self.assertEqual(seen, [({'age_over_18': 'yes'}, 3)])
+
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
         with (

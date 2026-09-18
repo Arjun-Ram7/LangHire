@@ -573,3 +573,117 @@ async def fill_phone_device_type(browser, worker_id: int = 0) -> bool:
         return True
     await _press(browser, "Escape")
     return False
+
+
+# --- application questions ---------------------------------------------------
+
+def _yes_no(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in {"yes", "true", "y", "1"}:
+        return "Yes"
+    if text in {"no", "false", "n", "0"}:
+        return "No"
+    return None
+
+
+def dropdown_answer(question: str, facts: dict[str, Any]) -> str | None:
+    """Answer a Workday Yes/No dropdown question from the candidate's facts, or None if it is
+    not one we know (or the fact is missing), leaving it to the AI or the candidate."""
+    text = _norm(question)
+    if any(phrase in text for phrase in ("18 years", "over 18", "at least 18", "age of 18")):
+        return _yes_no(facts.get("age_over_18"))
+    if "high school" in text or re.search(r"\bged\b", text):
+        return "Yes"
+    # Sponsorship questions also say "to work legally in the United States": test them first.
+    if "sponsorship" in text:
+        return _yes_no(facts.get("visa_sponsorship_needed"))
+    if any(phrase in text for phrase in ("legally authorized", "authorized to work", "eligible to work")):
+        return _yes_no(facts.get("authorized_to_work_us"))
+    if re.search(r"previously (?:been )?(?:worked|employed)", text) or "former employee" in text or "worked for us before" in text:
+        return _yes_no(facts.get("previously_worked_for_company"))
+    return None
+
+
+def text_answer(question: str, facts: dict[str, Any]) -> str | None:
+    text = _norm(question)
+    if any(phrase in text for phrase in ("salary expectation", "desired salary", "desired pay", "expected salary", "compensation expectation")):
+        return str(facts.get("desired_pay") or "").strip() or None
+    return None
+
+
+def option_rank(wanted: str, option: str) -> int:
+    """Exact match of a dropdown option; a prefix ("Not sure" for "No") never counts."""
+    return 2 if _norm(option) == _norm(wanted) else 0
+
+
+_QUESTIONS_JS = r"""(() => {
+  const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const visible = el => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  const out = [];
+  for (const field of document.querySelectorAll('[data-automation-id^="formField-"]')) {
+    const question = clean((field.querySelector('legend') || field.querySelector('label'))?.innerText).replace(/\*\s*$/, '');
+    const button = field.querySelector('button[aria-haspopup="listbox"]');
+    if (button) {
+      if (visible(button) && /^select/i.test(clean(button.innerText))) out.push({ kind: 'select', selector: '#' + CSS.escape(button.id), question });
+      continue;
+    }
+    if (field.getAttribute('data-automation-id') === 'formField-countryPhoneCode') {
+      const chosen = clean(field.querySelector('[data-automation-id="promptAriaInstruction"]')?.innerText).match(/(\d+)\s+items?\s+selected/i);
+      const input = field.querySelector('input');
+      if (input && visible(input) && !(chosen && Number(chosen[1]))) out.push({ kind: 'phone_code', selector: '#' + CSS.escape(input.id), question });
+      continue;
+    }
+    if ((field.getAttribute('data-fkit-id') || '').startsWith('primaryQuestionnaire--')) {
+      const box = field.querySelector('textarea, input[type="text"]');
+      if (box && visible(box) && !box.value) out.push({ kind: 'text', selector: '#' + CSS.escape(box.id), question });
+    }
+  }
+  return out;
+})()"""
+
+
+def _phone_code_rank(text: str) -> int:
+    # "United States of America (+1)": the +1 must be the country itself, not an island territory.
+    norm = _norm(text)
+    return 2 if norm.startswith("united states of america") and "1" in norm else 0
+
+
+async def fill_workday_questions(browser, facts: dict[str, Any], worker_id: int = 0) -> int:
+    """Answer blank Workday dropdown / short-answer questions and Country Phone Code from facts.
+
+    The static pass cannot open Workday's listbox buttons (they need trusted clicks), so it
+    reported these as blanks and the run fell to the AI even though the answers were known.
+    """
+    filled = 0
+    for item in await _eval(browser, _QUESTIONS_JS) or []:
+        element = f"document.querySelector({json.dumps(item['selector'])})"
+        kind, question = item["kind"], item["question"]
+        if kind == "select":
+            wanted = dropdown_answer(question, facts)
+            if not wanted or not await _click(browser, element):
+                continue
+            await asyncio.sleep(0.6)
+            if await _pick_option(browser, [wanted], lambda text: option_rank(wanted, text)):
+                filled += 1
+                print(f"    ✅ [W{worker_id}] {question[:60]}: {wanted}")
+            else:
+                await _press(browser, "Escape")
+        elif kind == "text":
+            answer = text_answer(question, facts)
+            if answer and await _type(browser, element, answer, bulk=True):
+                filled += 1
+                print(f"    ✅ [W{worker_id}] {question[:60]}: {answer}")
+        elif kind == "phone_code" and str(facts.get("phone_country_code") or "+1").strip() == "+1":
+            if await _type(browser, element, "United States of America"):
+                await _press(browser, "Enter")  # the search box only filters on Enter
+                await asyncio.sleep(1.5)
+                chosen = await _eval(browser, f"""(() => {{
+                  const t = ({element})?.closest('[data-automation-id="formField-countryPhoneCode"]')?.innerText || '';
+                  return /united states of america/i.test(t);
+                }})()""")
+                if chosen or await _pick_option(browser, ["United States"], _phone_code_rank):
+                    filled += 1
+                    print(f"    ✅ [W{worker_id}] Country phone code: United States of America (+1)")
+                else:
+                    await _press(browser, "Escape")
+    return filled

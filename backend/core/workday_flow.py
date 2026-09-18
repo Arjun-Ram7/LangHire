@@ -35,7 +35,7 @@ try:
         wait_while_ai_paused,
     )
     from core.config import load_profile
-    from core.workday_experience import education_plan, fill_education, fill_phone_device_type, fill_signature_dates, fill_work_history, load_work_experience, with_locations
+    from core.workday_experience import education_plan, fill_education, fill_phone_device_type, fill_signature_dates, fill_work_history, fill_workday_questions, load_work_experience, with_locations
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
@@ -60,6 +60,7 @@ except ImportError:
         fill_phone_device_type,
         fill_signature_dates,
         fill_work_history,
+        fill_workday_questions,
         load_work_experience,
         with_locations,
     )
@@ -631,9 +632,14 @@ async def _fill_deterministic_widgets(
             await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
     else:
         counters["experience"] = 0
-    for label, fill in (("Signature date", fill_signature_dates), ("Phone device type", fill_phone_device_type)):
+    fillers = (
+        ("Signature date", lambda: fill_signature_dates(browser, worker_id)),
+        ("Phone device type", lambda: fill_phone_device_type(browser, worker_id)),
+        ("Application questions", lambda: fill_workday_questions(browser, facts, worker_id)),
+    )
+    for label, fill in fillers:
         try:
-            await fill(browser, worker_id)
+            await fill()
         except Exception as exc:
             print(f"    ⚠️  [W{worker_id}] {label} fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
 

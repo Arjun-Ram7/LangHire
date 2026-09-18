@@ -3,10 +3,13 @@ from datetime import date
 from backend.core.workday_experience import (
     choose_work_row,
     degree_option_rank,
+    dropdown_answer,
     education_plan,
     parse_experience_text,
     phone_type_rank,
+    option_rank,
     signature_date_parts,
+    text_answer,
     with_locations,
 )
 
@@ -189,3 +192,54 @@ def test_phone_device_type_prefers_mobile_over_other_kinds():
     assert phone_type_rank("Home") == 0
     assert phone_type_rank("Select One") == 0
     assert phone_type_rank("Cell Phone") > 0
+
+
+FACTS = {
+    "age_over_18": "yes",
+    "authorized_to_work_us": "yes",
+    "visa_sponsorship_needed": "yes",
+    "previously_worked_for_company": "no",
+    "desired_pay": "Negotiable",
+}
+
+# Verbatim from live WEX application-question pages.
+QUESTIONS = [
+    ("Are you 18 years of age or older?", "Yes"),
+    ("Do you have a high school diploma or GED?", "Yes"),
+    ("Are you legally authorized to work in the United States?", "Yes"),
+    ("Do you now, or in the future, require sponsorship (for example, an H-1B petition, F-1 STEM OPT I-983 "
+     "training plan, adjustment of status portability through Form I-485, Supplement J, etc.) to work legally "
+     "for WEX Inc. in the United States?", "Yes"),
+    ("Have you previously worked at WEX?", "No"),
+    ("Have you previously been employed by WEX Inc.? **CURRENT EMPLOYEES: Please apply via your internal "
+     "Workday account instead.**", "No"),
+]
+
+
+def test_workday_yes_no_questions_are_answered_from_the_candidates_facts():
+    for question, expected in QUESTIONS:
+        assert dropdown_answer(question, FACTS) == expected, question
+
+
+def test_the_sponsorship_question_is_not_mistaken_for_work_authorization():
+    # It also says "to work legally ... in the United States".
+    assert dropdown_answer(QUESTIONS[3][0], {**FACTS, "visa_sponsorship_needed": "no"}) == "No"
+
+
+def test_an_unknown_question_or_a_missing_fact_is_left_alone():
+    assert dropdown_answer("What is your favourite colour?", FACTS) is None
+    assert dropdown_answer("Are you 18 years of age or older?", {}) is None
+
+
+def test_salary_expectation_uses_the_desired_pay_fact():
+    assert text_answer("What is your salary expectation?", FACTS) == "Negotiable"
+    assert text_answer("What is your salary expectation?", {}) is None
+    assert text_answer("Describe a project", FACTS) is None
+
+
+def test_yes_no_options_match_exactly_not_by_prefix():
+    options = ["Select One", "Yes", "No", "Not sure"]
+
+    assert max(options, key=lambda o: option_rank("No", o)) == "No"
+    assert option_rank("Yes", "Select One") == 0
+    assert option_rank("No", "Not sure") < option_rank("No", "No")
