@@ -168,7 +168,7 @@ async def open_for_manual_review(
         )
         await _wait_for_page_settle(browser, 1.0)
         review = await _static_fill_passes(
-            browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag
+            browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag, profile=profile
         )
         summary_before_llm = _summarize_review(review)
         needs_cleanup = _needs_llm_cleanup(summary_before_llm) or not preflight.get("clicked_linkedin")

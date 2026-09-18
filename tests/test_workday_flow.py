@@ -12,6 +12,7 @@ from backend.core.workday_flow import (
     save_open_questions,
     is_workday_url,
     run_workday_deterministic,
+    _fill_experience_step,
     _static_fill_passes,
 )
 
@@ -223,6 +224,22 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             [('history', 'My Experience'), ('education', 'My Experience'), ('static', 'My Experience')],
         )
         self.assertFalse([c for c in calls if c[0] != 'static' and c[1] != 'My Experience'])
+
+    async def test_experience_fill_loads_the_saved_profile_when_the_caller_passes_none(self):
+        # manual_review_queue and apply_jobs call the engine without a profile;
+        # locations must still come from the saved one.
+        seen = []
+        async def history(browser, entries, worker_id=0):
+            seen.extend(entries)
+            return {}
+        with (
+            patch('backend.core.workday_flow.load_work_experience', return_value=[{'title': 'Intern', 'company': 'Acme'}]),
+            patch('backend.core.workday_flow.load_profile', return_value={'work_locations': {'Acme': 'Reston, VA'}}),
+            patch('backend.core.workday_flow.fill_work_history', side_effect=history),
+            patch('backend.core.workday_flow.fill_education', new=AsyncMock()),
+        ):
+            await _fill_experience_step(object(), {}, '/tmp/resume.pdf', 1)
+        self.assertEqual(seen[0]['location'], 'Reston, VA')
 
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}

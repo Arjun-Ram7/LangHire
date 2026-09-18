@@ -34,6 +34,7 @@ try:
         wait_for_workday_human_checkpoint,
         wait_while_ai_paused,
     )
+    from core.config import load_profile
     from core.workday_experience import education_plan, fill_education, fill_work_history, load_work_experience, with_locations
 except ImportError:
     import backend.core.shared_config as config
@@ -52,6 +53,7 @@ except ImportError:
         wait_for_workday_human_checkpoint,
         wait_while_ai_paused,
     )
+    from backend.core.config import load_profile
     from backend.core.workday_experience import (
         education_plan,
         fill_education,
@@ -599,7 +601,7 @@ async def _fill_experience_step(
 ) -> None:
     """Add the resume's work history and the education row; the static pass only handles single fields."""
     try:
-        entries = with_locations(load_work_experience(resume_path), profile or {})
+        entries = with_locations(load_work_experience(resume_path), profile or load_profile())
         if entries:
             await fill_work_history(browser, entries, worker_id)
         await fill_education(browser, education_plan(facts), worker_id)
