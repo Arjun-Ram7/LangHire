@@ -39,14 +39,7 @@ try:
         update_job,
     )
     from core.config import load_settings
-    from core.workday_flow import (
-        _current_page,
-        _pause_for_workday_human_click,
-        _page_url,
-        _wait_for_page_settle,
-        run_workday_deterministic,
-        release_review_handoff,
-    )
+    from core.workday_flow import _current_page, _page_url, _wait_for_page_settle, run_workday_deterministic, release_review_handoff
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.autofill_facts import load_autofill_facts, run_static_autofill, set_ai_pause_control, wait_while_ai_paused
@@ -61,14 +54,7 @@ except ImportError:
         update_job,
     )
     from backend.core.config import load_settings
-    from backend.core.workday_flow import (
-        _current_page,
-        _pause_for_workday_human_click,
-        _page_url,
-        _wait_for_page_settle,
-        run_workday_deterministic,
-        release_review_handoff,
-    )
+    from backend.core.workday_flow import _current_page, _page_url, _wait_for_page_settle, run_workday_deterministic, release_review_handoff
 
 from cli.apply_jobs import _run_apply_preflight, _switch_to_tab
 from cli.workday_pages import is_workday_application, _probe
@@ -981,112 +967,12 @@ def _clear_automation_session_restore() -> int:
     return removed
 
 
-def _company_key(job: dict[str, Any]) -> str:
-    """Grouping key; a job with no company is its own group so it is never merged with another."""
-    return str(job.get("company") or "").strip().casefold() or f"\0{job.get('url', '')}"
-
-
-def _grouped(jobs: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for job in jobs:
-        groups.setdefault(_company_key(job), []).append(job)
-    return list(groups.values())
-
-
-def order_jobs_by_company(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Run jobs at one company back to back (companies in first-seen order): a Workday login
-    is per company, so the protected sign-in click is needed once per company, not once per job."""
-    return [job for group in _grouped(jobs) for job in group]
-
-
-def first_job_per_company(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [group[0] for group in _grouped(jobs)]
-
-
-def workday_sweep_candidates(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One job per company already known to use Workday (from a recorded application URL).
-    A new company's ATS is unknown until it is opened, so it is not swept, only ordered."""
-    picked = []
-    for group in _grouped(jobs):
-        known = next((job for job in group if is_workday_application(str(job.get("manual_review_url") or ""))), None)
-        if known is not None:
-            picked.append(known)
-    return picked
-
-
-async def _clear_workday_account_gate(browser: BrowserSession, facts: dict[str, Any], worker_id: int) -> str:
-    """Fill a Workday sign-in/create-account form and wait for the candidate's own click on the
-    protected button (deliberately never automated). Returns cleared, timed_out or no_gate."""
-    review = await run_static_autofill(browser, facts, resume_path="", guard_final_submit=True)
-    checkpoint = review.get("human_checkpoint") or {}
-    if not checkpoint.get("required"):
-        return "no_gate"
-    result = await _pause_for_workday_human_click(browser, worker_id, checkpoint)
-    return "timed_out" if result.get("timed_out") else "cleared"
-
-
-async def sign_in_sweep(
-    browser: BrowserSession,
-    jobs: list[dict[str, Any]],
-    profile: dict[str, Any],
-    *,
-    cancel_flag: dict | None = None,
-) -> dict[str, str]:
-    """Front-load the once-per-company Workday sign-in click.
-
-    Visits one job per company, fills the account form and waits for the candidate's click,
-    then closes the tab; the session cookie lets every later job at that company skip the gate.
-    Best effort: a company that is already signed in, or whose page is not an account gate, is
-    skipped, and the sweep ends at the first company nobody clicked for.
-    """
-    outcomes: dict[str, str] = {}
-    facts = _account_only_facts(profile)
-    for job in first_job_per_company(jobs):
-        if cancel_flag and cancel_flag.get("cancel_requested"):
-            break
-        company = _company_key(job)
-        baseline_ids = _baseline_tab_ids(await browser.get_tabs())
-        try:
-            await _run_apply_preflight(
-                browser,
-                url=str(job.get("url") or ""),
-                title=str(job.get("title") or ""),
-                company=str(job.get("company") or ""),
-                easy_apply=bool(job.get("easy_apply")),
-                static_facts={},
-                resume_path="",
-                guard_final_submit=False,
-                worker_id=0,
-                close_existing_tabs=False,
-                open_in_new_tab=True,
-                run_static=False,
-                cancel_flag=cancel_flag,
-            )
-            await _wait_for_page_settle(browser, 1.0)
-            surface, _decision, _target = await _select_application_tab(browser, baseline_ids)
-            outcome = (
-                await _clear_workday_account_gate(browser, facts, 0)
-                if is_workday_account_gate(surface)
-                else "no_gate"
-            )
-        except Exception as exc:
-            print(f"  ⚠️  Sign-in sweep skipped {job.get('company') or 'a job'}: {type(exc).__name__}: {str(exc)[:120]}")
-            outcome = "error"
-        outcomes[company] = outcome
-        await _close_owned_landing_tabs(browser, baseline_ids, "")
-        if outcome == "timed_out":
-            print("  ⏭️  No sign-in click detected; ending the sweep and continuing with the queue")
-            break
-    return outcomes
-
-
 async def run_fapply_queue(
     selected: list[dict[str, Any]],
     profile: dict[str, Any],
     *,
     cancel_flag: dict | None = None,
     clear_session_restore: bool = True,
-    signin_sweep: bool = True,
 ) -> dict[str, int]:
     extension = find_fapply_extension_path()
     if not extension:
@@ -1105,15 +991,6 @@ async def run_fapply_queue(
         "60 seconds for navigation; Workday uses LangHire deterministic + LLM filling to Review (10 minute limit); "
         "failures skip forward; no final submissions.\n"
     )
-    selected = order_jobs_by_company(selected)
-    sweep_jobs = workday_sweep_candidates(selected) if signin_sweep else []
-    if sweep_jobs:
-        print(
-            f"🔑 Sign-in sweep: click Create Account / Sign In once for each of {len(sweep_jobs)} "
-            "Workday company(ies); the rest of the queue then runs without stopping."
-        )
-        outcomes = await sign_in_sweep(browser, sweep_jobs, profile, cancel_flag=cancel_flag)
-        print(f"🔑 Sign-in sweep done: {outcomes}\n")
     stats: dict[str, int] = {}
     for index, job in enumerate(selected, start=1):
         if cancel_flag and cancel_flag.get("cancel_requested"):
