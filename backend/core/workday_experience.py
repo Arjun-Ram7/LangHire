@@ -224,6 +224,7 @@ _STATE_JS = r"""(() => {
       const degree = clean(row.querySelector('[data-automation-id="formField-degree"] button')?.innerText);
       return {
         id: row.getAttribute('data-fkit-id'),
+        job: row.getAttribute('data-langhire-job') || '',
         title: val(row, 'input[name="jobTitle"]'),
         company: val(row, 'input[name="companyName"]'),
         location: val(row, 'input[name="location"]'),
@@ -380,6 +381,31 @@ async def _fill_work_row(browser, row: dict[str, Any], entry: dict[str, Any]) ->
     return touched
 
 
+async def _mark_row(browser, row_id: str, index: int) -> None:
+    selector = json.dumps(f'[data-fkit-id="{row_id}"]')
+    await _eval(browser, f"document.querySelector({selector})?.setAttribute('data-langhire-job', '{index}')")
+
+
+def choose_work_row(
+    rows: list[dict[str, Any]], entry: dict[str, Any], index: int, entry_count: int
+) -> tuple[str, dict[str, Any] | None]:
+    """Pick the row for resume entry `index`: ("row", row) to fill or complete it,
+    ("add", None) to click Add, or ("full", None) when a new row would exceed the entry count.
+
+    Rows carry a marker once filled, so a row whose text was later changed is still
+    recognised as ours; adding is capped so a failed match can never grow the list forever.
+    """
+    for row in rows:
+        if row.get("job") == str(index) or _same_job(row, entry):
+            return "row", row
+    blank = next((row for row in rows if not row["title"] and not row["company"] and not row.get("job")), None)
+    if blank is not None:
+        return "row", blank
+    if len(rows) >= entry_count:
+        return "full", None
+    return "add", None
+
+
 def _same_job(row: dict[str, Any], entry: dict[str, Any]) -> bool:
     return _norm(row.get("title", "")) == _norm(entry["title"]) and _norm(row.get("company", "")) == _norm(entry["company"])
 
@@ -390,34 +416,31 @@ async def fill_work_history(browser, entries: list[dict[str, Any]], worker_id: i
     section = (await _state(browser)).get("Work Experience")
     if section is None:
         return {**report, "skipped": "no work experience section"}
-    for entry in entries:
-        rows = section.get("rows") or []
-        target = next((row for row in rows if _same_job(row, entry)), None)
-        if target is not None:
-            # A half-filled row from an earlier pass: complete it instead of adding a duplicate.
-            if await _fill_work_row(browser, target, entry):
-                report["added"] += 1
-            else:
-                report["already_present"] += 1
-            section = (await _state(browser)).get("Work Experience") or section
+    for index, entry in enumerate(entries):
+        action, target = choose_work_row(section.get("rows") or [], entry, index, len(entries))
+        if action == "full":
+            report["failed"].append(f"{entry['title']}: rows already fill the list")
             continue
-        target = next((row for row in rows if not row["title"] and not row["company"]), None)
-        if target is None:
+        if action == "add":
+            before = len(section.get("rows") or [])
             if not section.get("add") or not await _click(
                 browser, "document.evaluate('//h4[normalize-space()=\"Work Experience\"]', document, null, 9, null)"
                          ".singleNodeValue.parentElement.querySelector('[data-automation-id=\"add-button\"]')"
             ):
                 report["failed"].append(f"{entry['title']}: no Add button")
                 continue
-            section = await _wait_rows(browser, "Work Experience", len(rows) + 1)
-            target = next((row for row in section.get("rows") or [] if not row["title"] and not row["company"]), None)
-            if target is None:
+            section = await _wait_rows(browser, "Work Experience", before + 1)
+            _, target = choose_work_row(section.get("rows") or [], entry, index, len(entries) + 1)
+            if target is None or target.get("job") not in ("", str(index)):
                 report["failed"].append(f"{entry['title']}: new row did not appear")
                 continue
-        await _fill_work_row(browser, target, entry)
+        await _mark_row(browser, target["id"], index)
+        if await _fill_work_row(browser, target, entry):
+            report["added"] += 1
+            print(f"    🧾 [W{worker_id}] Work experience: {entry['title']} — {entry['company']}")
+        else:
+            report["already_present"] += 1
         section = (await _state(browser)).get("Work Experience") or section
-        report["added"] += 1
-        print(f"    🧾 [W{worker_id}] Work experience: {entry['title']} — {entry['company']}")
     return report
 
 

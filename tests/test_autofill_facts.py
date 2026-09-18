@@ -90,6 +90,42 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         finally:
             page.close()
 
+    WORK_ROW = """
+    <div data-fkit-id="workExperience-1--null">
+      <div data-automation-id="formField-jobTitle"><label for="jt">Job Title<abbr>*</abbr></label>
+        <input type="text" id="jt" name="jobTitle" value="{title}"></div>
+      <div data-automation-id="formField-companyName"><label for="co">Company<abbr>*</abbr></label>
+        <input type="text" id="co" name="companyName" value="{company}"></div>
+      <div data-automation-id="formField-location"><label for="loc">Location</label>
+        <input type="text" id="loc" name="location" value="{location}"></div>
+    </div>
+    """
+    OWN_FACTS = {
+        **WORKDAY_FACTS,
+        "current_role": "Computer Science student at Virginia Tech",
+        "current_employer": "Virginia Tech",
+        "current_location": "Blacksburg, Virginia",
+        "city": "Blacksburg",
+    }
+
+    def test_work_experience_rows_are_left_to_the_row_filler(self):
+        # Live run: the static pass rewrote every added row to the candidate's
+        # own role/employer/city, so the row filler saw no matching job, added
+        # another row, and the page never got past My Experience.
+        _result, values = self.run_fixture(
+            self.WORK_ROW.format(title="AI/ML Intern", company="Marsh McLennan", location="Dubai, United Arab Emirates"),
+            self.OWN_FACTS,
+        )
+
+        self.assertEqual(values["jt"], "AI/ML Intern")
+        self.assertEqual(values["co"], "Marsh McLennan")
+        self.assertEqual(values["loc"], "Dubai, United Arab Emirates")
+
+    def test_blank_work_experience_row_is_not_filled_with_the_candidates_own_job(self):
+        _result, values = self.run_fixture(self.WORK_ROW.format(title="", company="", location=""), self.OWN_FACTS)
+
+        self.assertEqual((values["jt"], values["co"], values["loc"]), ("", "", ""))
+
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
             """

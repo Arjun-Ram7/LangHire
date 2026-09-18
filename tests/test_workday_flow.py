@@ -241,6 +241,29 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             await _fill_experience_step(object(), {}, '/tmp/resume.pdf', 1)
         self.assertEqual(seen[0]['location'], 'Reston, VA')
 
+    async def test_experience_fill_runs_at_most_twice_per_visit_to_the_step(self):
+        # However many passes the page needs, the row filler must not keep re-running.
+        calls = []
+        counter = iter(range(100))
+        async def surface(*args, **kwargs):
+            return {'step': 'My Experience', 'formish': True, 'ready': 'complete', 'body_length': 500}
+        async def history(browser, entries, worker_id=0):
+            calls.append('history')
+            return {}
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', side_effect=lambda *a, **k: {'url': 'u', 'filled': next(counter)}),
+            patch('backend.core.workday_flow.try_safe_progress_step', side_effect=lambda *a: {'clicked': True, 'reason': 'form_continue', 'label': 'Save and Continue', 'url': f'u{next(counter)}'}),
+            patch('backend.core.workday_flow.load_work_experience', return_value=[{'title': 'T', 'company': 'C'}]),
+            patch('backend.core.workday_flow.fill_work_history', side_effect=history),
+            patch('backend.core.workday_flow.fill_education', new=AsyncMock()),
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            await _static_fill_passes(object(), {}, '/tmp/r.pdf', 6, 1, profile={})
+        self.assertEqual(len(calls), 2)
+
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
         with (

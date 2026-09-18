@@ -1453,6 +1453,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function pickTextFact(el, text) {{
+    // Work-history rows belong to the Workday row filler (workday_experience.py).
+    // Matching "Job Title"/"Company"/"Location" here overwrites them with the
+    // candidate's own current role, employer and city.
+    if (el.closest?.('[data-fkit-id^="workExperience-"]')) return ['', ''];
     text = preferPrimaryFieldText(el, text);
     const type = norm(el.type);
     if (el.tagName === 'TEXTAREA') {{

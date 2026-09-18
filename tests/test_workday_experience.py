@@ -1,4 +1,5 @@
 from backend.core.workday_experience import (
+    choose_work_row,
     degree_option_rank,
     education_plan,
     parse_experience_text,
@@ -140,3 +141,33 @@ def test_unknown_employer_is_left_blank_rather_than_guessed():
     jobs = with_locations([_job("Marsh McLennan (Mercer Marsh Benefits)")], PROFILE)
 
     assert jobs[0]["location"] == ""
+
+
+def _row(row_id, title="", company="", job=""):
+    return {"id": row_id, "title": title, "company": company, "job": job}
+
+
+ENTRY = {"title": "AI/ML Intern", "company": "Marsh McLennan"}
+
+
+def test_a_row_we_already_filled_is_reused_even_if_its_text_was_changed():
+    rows = [_row("a", "Something else", "Someone else", job="0"), _row("b")]
+
+    assert choose_work_row(rows, ENTRY, 0, 2) == ("row", rows[0])
+
+
+def test_a_blank_row_is_filled_before_a_new_one_is_added():
+    rows = [_row("a", "Other", "Other", job="1"), _row("b")]
+
+    assert choose_work_row(rows, ENTRY, 0, 3) == ("row", rows[1])
+
+
+def test_a_row_is_added_only_while_fewer_rows_than_entries_exist():
+    assert choose_work_row([_row("a", "X", "Y", job="1")], ENTRY, 0, 2) == ("add", None)
+
+
+def test_rows_never_grow_past_the_entry_count():
+    # The live loop: every pass added five more rows because none "matched".
+    rows = [_row(str(i), f"T{i}", f"C{i}") for i in range(5)]
+
+    assert choose_work_row(rows, ENTRY, 0, 5) == ("full", None)

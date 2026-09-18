@@ -624,13 +624,19 @@ async def _static_fill_passes(
     seen_signatures: dict[str, int] = {}
     seen_progress_clicks: dict[str, int] = {}
     last_surface: dict = {}
+    experience_fills = 0
     for idx in range(max(1, passes)):
         await wait_while_ai_paused(browser, cancel_flag, worker_id)
         if cancel_flag and cancel_flag.get("cancel_requested"):
             break
         last_surface = await _wait_for_visible_surface(browser, timeout=12.0 if idx == 0 else 5.0)
         if re.search(r"my experience", str(last_surface.get("step") or ""), re.I):
-            await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
+            # Two tries per visit: enough to finish a half-filled page, never a runaway loop.
+            if experience_fills < 2:
+                experience_fills += 1
+                await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
+        else:
+            experience_fills = 0
         review = await run_static_autofill(
             browser,
             facts,
