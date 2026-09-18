@@ -5,6 +5,7 @@ from backend.core.workday_experience import (
     degree_option_rank,
     education_plan,
     parse_experience_text,
+    phone_type_rank,
     signature_date_parts,
     with_locations,
 )
@@ -179,3 +180,12 @@ def test_rows_never_grow_past_the_entry_count():
 def test_signature_date_is_todays_date_as_zero_padded_month_day_year():
     assert signature_date_parts(date(2026, 9, 8)) == ("09", "08", "2026")
     assert signature_date_parts(date(2026, 12, 25)) == ("12", "25", "2026")
+
+
+def test_phone_device_type_prefers_mobile_over_other_kinds():
+    options = ["Select One", "Home", "Work", "Mobile", "Telephone"]
+
+    assert max(options, key=phone_type_rank) == "Mobile"
+    assert phone_type_rank("Home") == 0
+    assert phone_type_rank("Select One") == 0
+    assert phone_type_rank("Cell Phone") > 0

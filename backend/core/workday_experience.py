@@ -543,3 +543,33 @@ async def fill_signature_dates(browser, worker_id: int = 0, today: date | None =
     if filled:
         print(f"    📅 [W{worker_id}] Signature date: {month}/{day}/{year}")
     return filled
+
+
+def phone_type_rank(option: str) -> int:
+    """Phone Device Type is answered Mobile; anything else (Home, Work, "Select One") is unusable."""
+    text = _norm(option)
+    if text == "mobile":
+        return 2
+    return int(any(word in text for word in ("mobile", "cell")))
+
+
+_PHONE_TYPE_BUTTON = (
+    "Array.from(document.querySelectorAll('button[aria-haspopup=\"listbox\"]'))"
+    ".find(b => /phone device type/i.test(b.getAttribute('aria-label') || ''))"
+)
+
+
+async def fill_phone_device_type(browser, worker_id: int = 0) -> bool:
+    """Choose Mobile in an unanswered Phone Device Type dropdown (My Information)."""
+    unanswered = await _eval(browser, f"""(() => {{
+      const button = {_PHONE_TYPE_BUTTON};
+      return !!button && /^select/i.test((button.innerText || '').trim());
+    }})()""")
+    if not unanswered or not await _click(browser, _PHONE_TYPE_BUTTON):
+        return False
+    await asyncio.sleep(0.6)
+    if await _pick_option(browser, ["Mobile"], phone_type_rank):
+        print(f"    📱 [W{worker_id}] Phone device type: Mobile")
+        return True
+    await _press(browser, "Escape")
+    return False

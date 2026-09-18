@@ -35,7 +35,7 @@ try:
         wait_while_ai_paused,
     )
     from core.config import load_profile
-    from core.workday_experience import education_plan, fill_education, fill_signature_dates, fill_work_history, load_work_experience, with_locations
+    from core.workday_experience import education_plan, fill_education, fill_phone_device_type, fill_signature_dates, fill_work_history, load_work_experience, with_locations
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
@@ -57,6 +57,7 @@ except ImportError:
     from backend.core.workday_experience import (
         education_plan,
         fill_education,
+        fill_phone_device_type,
         fill_signature_dates,
         fill_work_history,
         load_work_experience,
@@ -611,6 +612,32 @@ async def _fill_experience_step(
         print(f"    ⚠️  [W{worker_id}] Work history/education fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
+async def _fill_deterministic_widgets(
+    browser: BrowserSession,
+    facts: dict,
+    resume_path: str,
+    worker_id: int,
+    profile: dict | None,
+    step: str,
+    counters: dict,
+) -> None:
+    """Fill the widgets the static pass cannot drive. Runs before every static pass, whether the
+    deterministic loop or the LLM cleanup is stepping the wizard, so a page the AI walks into
+    (My Experience, a signature date, Phone Device Type) is still filled by code, not by the AI."""
+    if re.search(r"my experience", step or "", re.I):
+        # Two tries per visit: enough to finish a half-filled page, never a runaway loop.
+        if counters.get("experience", 0) < 2:
+            counters["experience"] = counters.get("experience", 0) + 1
+            await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
+    else:
+        counters["experience"] = 0
+    for label, fill in (("Signature date", fill_signature_dates), ("Phone device type", fill_phone_device_type)):
+        try:
+            await fill(browser, worker_id)
+        except Exception as exc:
+            print(f"    ⚠️  [W{worker_id}] {label} fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
+
+
 async def _static_fill_passes(
     browser: BrowserSession,
     facts: dict,
@@ -625,23 +652,15 @@ async def _static_fill_passes(
     seen_signatures: dict[str, int] = {}
     seen_progress_clicks: dict[str, int] = {}
     last_surface: dict = {}
-    experience_fills = 0
+    fill_counters: dict = {}
     for idx in range(max(1, passes)):
         await wait_while_ai_paused(browser, cancel_flag, worker_id)
         if cancel_flag and cancel_flag.get("cancel_requested"):
             break
         last_surface = await _wait_for_visible_surface(browser, timeout=12.0 if idx == 0 else 5.0)
-        if re.search(r"my experience", str(last_surface.get("step") or ""), re.I):
-            # Two tries per visit: enough to finish a half-filled page, never a runaway loop.
-            if experience_fills < 2:
-                experience_fills += 1
-                await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
-        else:
-            experience_fills = 0
-        try:
-            await fill_signature_dates(browser, worker_id)
-        except Exception as exc:
-            print(f"    ⚠️  [W{worker_id}] Signature date fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
+        await _fill_deterministic_widgets(
+            browser, facts, resume_path, worker_id, profile, str(last_surface.get("step") or ""), fill_counters
+        )
         review = await run_static_autofill(
             browser,
             facts,
@@ -906,6 +925,8 @@ async def _run_llm_cleanup(
         if owned_tabs:
             await set_ai_pause_controls_for_tabs(browser, owned_tabs)
 
+    fill_counters: dict = {}
+
     async def wait_for_user_resume() -> None:
         """Hold the agent between steps while the browser overlay is paused."""
         nonlocal pause_active
@@ -944,6 +965,10 @@ async def _run_llm_cleanup(
         nonlocal previous_issue_sig, consecutive_issue_repeats
         state["steps"] += 1
         await wait_for_user_resume()
+        await _fill_deterministic_widgets(
+            browser, facts, resume_path, worker_id, profile,
+            str((await _probe_visible_surface(browser)).get("step") or ""), fill_counters,
+        )
         review = await run_static_autofill(
             browser,
             facts,

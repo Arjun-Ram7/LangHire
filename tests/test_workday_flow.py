@@ -12,6 +12,7 @@ from backend.core.workday_flow import (
     save_open_questions,
     is_workday_url,
     run_workday_deterministic,
+    _fill_deterministic_widgets,
     _fill_experience_step,
     _static_fill_passes,
 )
@@ -287,6 +288,27 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
         ):
             await _static_fill_passes(object(), {}, '', 1, 1)
         self.assertEqual(order, ['dates', 'static'])
+
+    async def test_widget_fillers_run_together_and_one_failing_does_not_stop_the_rest(self):
+        # Used by both the deterministic loop and the LLM cleanup's per-step hook.
+        calls = []
+        async def boom(browser, worker_id=0):
+            calls.append('dates')
+            raise RuntimeError('cdp gone')
+        async def phone(browser, worker_id=0):
+            calls.append('phone')
+            return True
+        with (
+            patch('backend.core.workday_flow.fill_signature_dates', side_effect=boom),
+            patch('backend.core.workday_flow.fill_phone_device_type', side_effect=phone),
+            patch('backend.core.workday_flow._fill_experience_step', new=AsyncMock()) as experience,
+        ):
+            counters = {}
+            await _fill_deterministic_widgets(object(), {}, '/tmp/r.pdf', 1, {}, 'My Information', counters)
+            experience.assert_not_awaited()
+            await _fill_deterministic_widgets(object(), {}, '/tmp/r.pdf', 1, {}, 'My Experience', counters)
+            experience.assert_awaited_once()
+        self.assertEqual(calls, ['dates', 'phone', 'dates', 'phone'])
 
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
