@@ -10,6 +10,7 @@ from cli.apply_jobs import _click_apply_button_script
 from cli.fapply_queue import (
     FAPPLY_EXTENSION_ID,
     _account_only_facts,
+    _baseline_tab_ids,
     _run_job_with_deadline,
     assess_fill_evidence,
     classify_application_surface,
@@ -102,6 +103,112 @@ class WorkdayFapplyRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 'fapply_verified')
         self.assertEqual((pages, single), (0, 1))
         deadline.reschedule.assert_not_called()
+
+
+WEX_CREATE_ACCOUNT = {
+    "url": "https://wexinc.wd5.myworkdayjobs.com/en-US/wexinc/job/US---Remote/Intern_R1/apply/applyManually",
+    "title": "Create Account",
+    "bodyText": "Create Account Password Requirements Email Address Password Verify New Password "
+                "Create Account Already have an account? Sign In Forgot your password?",
+    "controlCount": 3,
+    "identityCount": 1,
+    "fileInputs": 0,
+    "passwordInputs": 2,
+    "buttonLabels": ["Create Account"],
+}
+
+
+def _tab(target_id, url):
+    return MagicMock(target_id=target_id, url=url)
+
+
+def test_baseline_ignores_blank_tabs_that_navigation_will_reuse():
+    tabs = [
+        _tab("BLANK", "about:blank"),
+        _tab("NTP", "chrome://newtab/"),
+        _tab("FAPPLY", "https://www.fapply.ai/profile_htmls/summary.html"),
+    ]
+
+    assert _baseline_tab_ids(tabs) == {"FAPPLY"}
+
+
+class FreshBrowserWorkdayTests(unittest.IsolatedAsyncioTestCase):
+    """A just-launched Brave hands its blank tab to the first navigation."""
+
+    async def run_job(self, surface, *, tab_id="BLANK", baseline_url="about:blank"):
+        state = {"opened": False}
+        url = surface["url"]
+
+        async def get_tabs():
+            if not state["opened"]:
+                return [_tab("BLANK", baseline_url)]
+            tabs = [_tab(tab_id, url)]
+            if tab_id != "BLANK":
+                tabs.insert(0, _tab("BLANK", baseline_url))
+            return tabs
+
+        async def preflight(*_args, **_kwargs):
+            state["opened"] = True
+            return {}
+
+        browser = AsyncMock()
+        browser.get_tabs = get_tabs
+        with (
+            patch("cli.fapply_queue.claim_job", return_value=True),
+            patch("cli.fapply_queue.update_job") as update,
+            patch("cli.fapply_queue._run_apply_preflight", new=preflight),
+            patch("cli.fapply_queue._wait_for_page_settle", new=AsyncMock()),
+            patch("cli.fapply_queue._switch_to_tab", new=AsyncMock()),
+            patch("cli.fapply_queue.probe_application_surface", new=AsyncMock(
+                return_value=(surface, classify_application_surface(surface))
+            )),
+            patch("cli.fapply_queue._navigate_and_clear_account_gate", new=AsyncMock(
+                return_value={"attempted": False}
+            )) as llm_gate,
+            patch("cli.fapply_queue._close_owned_landing_tabs", new=AsyncMock(return_value=0)),
+            patch("cli.fapply_queue._page_url", new=AsyncMock(return_value=url)),
+            patch("cli.fapply_queue.load_autofill_facts", return_value={}),
+            patch("cli.fapply_queue.run_workday_deterministic", new=AsyncMock(return_value={"summary": {}})) as engine,
+            patch("cli.fapply_queue._current_page", new=AsyncMock(return_value=object())),
+            patch("cli.fapply_queue._probe", new=AsyncMock(return_value={"review": False, "blockers": []})),
+            patch("cli.fapply_queue.release_review_handoff", new=AsyncMock()),
+        ):
+            status = await open_with_fapply(browser, {"url": url}, {}, 1, deadline=MagicMock())
+        return status, engine, llm_gate, update
+
+    async def test_workday_form_in_the_reused_blank_tab_is_found(self):
+        form = {
+            "url": "https://wexinc.wd5.myworkdayjobs.com/en-US/wexinc/job/US---Remote/Intern_R1/apply/useMyLastApplication",
+            "title": "My Information",
+            "bodyText": "Job Application My Information Legal Name First Name Last Name Email Phone Resume",
+            "controlCount": 9,
+            "identityCount": 5,
+            "fileInputs": 1,
+            "passwordInputs": 0,
+            "buttonLabels": ["Save and Continue"],
+        }
+
+        status, engine, _llm_gate, _update = await self.run_job(form)
+
+        self.assertEqual(status, "workday_needs_input")
+        engine.assert_awaited_once()
+
+    async def test_workday_create_account_goes_to_engine_for_human_click_checkpoint(self):
+        status, engine, llm_gate, update = await self.run_job(WEX_CREATE_ACCOUNT, tab_id="NEW")
+
+        self.assertEqual(status, "workday_needs_input")
+        engine.assert_awaited_once()
+        llm_gate.assert_not_awaited()
+        self.assertNotEqual(update.call_args.kwargs["status"], "failed")
+
+    async def test_non_workday_account_gate_still_uses_navigation_agent(self):
+        surface = {**WEX_CREATE_ACCOUNT, "url": "https://jobs.example.com/apply/login"}
+
+        status, engine, llm_gate, _update = await self.run_job(surface, tab_id="NEW")
+
+        self.assertEqual(status, "not_application")
+        engine.assert_not_awaited()
+        llm_gate.assert_awaited_once()
 
 
 def test_apply_request_accepts_fapply_mode():

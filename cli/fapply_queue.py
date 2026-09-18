@@ -23,6 +23,7 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from browser_use import Agent, BrowserSession
+from browser_use.utils import is_new_tab_page
 
 try:
     import core.shared_config as config
@@ -549,6 +550,18 @@ async def run_fapply_and_verify(browser: BrowserSession, timeout: float | None =
     }
 
 
+def _baseline_tab_ids(tabs: Iterable[Any]) -> set[str]:
+    """Tabs that existed before this job. Blank tabs are excluded because
+    browser_use reuses one for the first navigation, so it is not "old"."""
+    return {str(tab.target_id) for tab in tabs if not is_new_tab_page(str(tab.url or ""))}
+
+
+def is_workday_account_gate(surface: dict[str, Any]) -> bool:
+    """Workday sign-in/create-account pages belong to the Workday engine, which
+    fills them and hands the account click to the human."""
+    return is_workday_application(str(surface.get("url") or "")) and is_account_surface(surface)
+
+
 async def _select_application_tab(
     browser: BrowserSession, baseline_ids: set[str]
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -742,7 +755,7 @@ async def open_with_fapply(
     print(f"  ⚡ [F{worker_id}] Opening application for Fapply: {title} at {company}")
     preflight: dict[str, Any] = {}
     current_url = ""
-    baseline_ids = {str(tab.target_id) for tab in await browser.get_tabs()}
+    baseline_ids = _baseline_tab_ids(await browser.get_tabs())
     try:
         preflight = await _run_apply_preflight(
             browser,
@@ -761,7 +774,8 @@ async def open_with_fapply(
         )
         await _wait_for_page_settle(browser, 1.0)
         surface, decision, target_id = await _select_application_tab(browser, baseline_ids)
-        if not decision.get("is_application") and target_id:
+        workday_gate = is_workday_account_gate(surface)
+        if not decision.get("is_application") and not workday_gate and target_id:
             fallback = await _navigate_and_clear_account_gate(
                 browser,
                 profile=profile,
@@ -774,8 +788,9 @@ async def open_with_fapply(
                 preflight.setdefault("notes", []).append(str(fallback.get("reason") or "LLM navigation fallback"))
                 await _wait_for_page_settle(browser, 2.0)
                 surface, decision, target_id = await _select_application_tab(browser, baseline_ids)
+                workday_gate = is_workday_account_gate(surface)
         current_url = str(surface.get("url") or await _page_url(browser))
-        if not decision.get("is_application"):
+        if not decision.get("is_application") and not workday_gate:
             reason = f"Application form not reached; Fapply was not clicked ({decision.get('reason')})"
             update_job(
                 url,
