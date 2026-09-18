@@ -533,6 +533,8 @@ async def _probe_visible_surface(browser: BrowserSession) -> dict:
             accountish: /sign in|log in|create account|register|password|not a registered user/i.test(body),
             formish: inputs.length > 0 || /resume|upload|application|candidate|work authorization|sponsorship/i.test(body),
             loadingish: /loading|please wait/i.test(text) && inputs.length === 0,
+            step: Array.from(document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], main h2, [role="main"] h2'))
+              .filter(visible).map(el => norm(el.innerText)).join(' | '),
             title: document.title
           };
         }"""
@@ -650,6 +652,7 @@ async def _static_fill_passes(
         signature = json.dumps(
             {
                 "url": review.get("url", ""),
+                "step": last_surface.get("step", ""),
                 "required": (review.get("requiredEmptyLabels") or [])[:6],
                 "errors": (review.get("visibleErrors") or [])[:6],
                 "needs": (review.get("needsLlm") or [])[:6],
@@ -688,6 +691,7 @@ async def _static_fill_passes(
                     "reason": progress_entry["reason"],
                     "label": progress_entry["label"][:100],
                     "url": progress_entry["url"],
+                    "step": last_surface.get("step", ""),
                 },
                 sort_keys=True,
             )
@@ -954,6 +958,9 @@ async def _run_llm_cleanup(
         issue_sig = json.dumps(
             {
                 "url": review.get("url", ""),
+                "step": (await _probe_visible_surface(browser)).get("step", ""),
+                "action": _agent_action_signature(_agent_output),
+                "filled": int(review.get("filled") or 0) + int(review.get("choices") or 0) + int(review.get("selects") or 0),
                 "required": (review.get("requiredEmptyLabels") or [])[:5],
                 "errors": (review.get("visibleErrors") or [])[:5],
                 "needs": (review.get("needsLlm") or [])[:5],
@@ -1096,12 +1103,16 @@ async def _run_llm_cleanup(
             max_history_items=8,
             calculate_cost=True,
             directly_open_url=False,
-            register_new_step_callback=on_step,
             register_should_stop_callback=should_stop,
         )
+        async def after_actions(current_agent):
+            # browser-use's new_step callback runs AFTER model planning but
+            # BEFORE its clicks. Mutating the DOM there invalidates indices.
+            await on_step(None, current_agent.state.last_model_output, current_agent.state.n_steps)
+
         # Count only active automation time. A user can leave the overlay
         # paused as long as needed without the cleanup timeout killing the run.
-        agent_task = asyncio.create_task(agent.run(max_steps=max_steps))
+        agent_task = asyncio.create_task(agent.run(max_steps=max_steps, on_step_end=after_actions))
         active_elapsed = 0.0
         last_tick = asyncio.get_event_loop().time()
         while True:
@@ -1233,6 +1244,9 @@ async def run_workday_deterministic(
     llm_cleanup: bool = True,
     llm_steps: int = 35,
     llm_timeout: float = 300.0,
+    profile: dict | None = None,
+    cancel_flag: dict | None = None,
+    ignored_target_ids: set[str] | None = None,
 ) -> dict:
     """Fill and click through a Workday application without a vision agent.
 
@@ -1242,24 +1256,26 @@ async def run_workday_deterministic(
     review: dict = {}
     progress_made = False
     try:
-        review = await _static_fill_passes(browser, facts, resume_path, passes, worker_id)
+        review = await _static_fill_passes(browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag)
         progress_made = True
 
         summary_before_cleanup = _summarize_review(review)
         needs_cleanup = _needs_llm_cleanup(summary_before_cleanup)
         can_cleanup = _can_run_llm_cleanup(summary_before_cleanup, preflight={})
-        if llm_cleanup and needs_cleanup and can_cleanup:
+        if llm_cleanup and needs_cleanup and can_cleanup and not (cancel_flag or {}).get("cancel_requested"):
             scaled_steps, scaled_timeout = scale_cleanup_budget(summary_before_cleanup, llm_steps, llm_timeout)
             cleanup = await _run_llm_cleanup(
                 browser,
                 facts=facts,
-                profile={},
+                profile=profile or {},
                 resume_path=resume_path,
                 title=facts.get("job_title", ""),
                 company=facts.get("job_company", ""),
                 worker_id=worker_id,
                 max_steps=scaled_steps,
                 timeout=scaled_timeout,
+                cancel_flag=cancel_flag,
+                ignored_target_ids=ignored_target_ids,
             )
             if cleanup.get("last_review"):
                 review = cleanup["last_review"]

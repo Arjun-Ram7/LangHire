@@ -482,6 +482,19 @@ def _autofill_script(facts: dict[str, str]) -> str:
     return f"""
 (async () => {{
   const facts = {payload};
+  const workdayWizard = /(^|\\.)(myworkdayjobs\\.com|myworkdaysite\\.com|workday\\.com)$/i.test(location.hostname);
+  // Static scans are not failed LLM attempts. Workday requires every required
+  // field before Next, so never hide those fields from the cleanup agent.
+  if (workdayWizard) {{
+    document.querySelectorAll('[data-static-abandoned="true"], [data-static-deferred="true"]').forEach(el => {{
+      delete el.dataset.staticAbandoned;
+      delete el.dataset.staticDeferred;
+      delete el.dataset.staticUnresolvedPasses;
+      el.style.pointerEvents = '';
+      el.removeAttribute('aria-disabled');
+      el.removeAttribute('tabindex');
+    }});
+  }}
   const result = {{
     filled: 0,
     restored: 0,
@@ -1062,7 +1075,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     // A deferred field is not interactive yet, so this pass was never an
     // attempt on it. Counting it would abandon a question before the agent
     // could reach it.
-    if (!countedThisPass.has(el) && el.dataset.staticDeferred !== 'true') {{
+    if (!workdayWizard && !countedThisPass.has(el) && el.dataset.staticDeferred !== 'true') {{
       countedThisPass.add(el);
       const attempts = Number(el.dataset.staticUnresolvedPasses || 0) + 1;
       el.dataset.staticUnresolvedPasses = String(attempts);
@@ -2502,6 +2515,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (!comboboxLooksEmpty(control)) return false;
     const groupText = closestQuestionText(control) || labelText(control);
     if (!groupText) return false;
+    // Don't toggle an unsupported Workday menu after the LLM opens it.
+    // Known choices (state, source, demographics) still use static facts.
+    if (workdayWizard && !Object.values(facts).some(value =>
+      typeof value === 'string' && customFieldMatch(norm(value), groupText))) return false;
     const beforeChoices = result.choices + result.selects;
     if (!clickLikeHuman(control)) return false;
     await sleep(250);
@@ -2758,6 +2775,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
   // than merely discouraged by the prompt. Deferral is reversed as soon as the
   // field above is answered or abandoned, so each field gets its turn.
   function gateUnresolvedFieldsToDocumentOrder() {{
+    if (workdayWizard) return;
     const unresolved = allElements('input, select, textarea, [role="combobox"], [contenteditable="true"]')
       .filter((el) => visible(el)
         && !el.disabled

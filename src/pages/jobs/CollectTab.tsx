@@ -174,7 +174,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
     setShowConfirmDialog(false);
     try {
       const res = await startJobCollection(
-        collectTitle || undefined,
+        collectSource === "speedyapply" ? undefined : collectTitle || undefined,
         collectMaxJobs ? Number(collectMaxJobs) : undefined,
         collectSource,
         effectiveCollectFilters
@@ -340,12 +340,16 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       <div className="card mb-5">
         <h3 className="section-title mb-3">{t("collector.title")}</h3>
         <p className="text-[13px] text-muted-foreground mb-4">
-          {t("collector.description")}
+          {collectSource === "speedyapply"
+            ? "Collect every FAANG+ and Other listing with its direct Apply link. Leave the job limit blank to collect all. Description and visa checks can be run separately."
+            : t("collector.description")}
         </p>
-        <div
-          className="info-box mb-4"
-          dangerouslySetInnerHTML={{ __html: t("collector.loginInfo") }}
-        />
+        {collectSource !== "speedyapply" && (
+          <div
+            className="info-box mb-4"
+            dangerouslySetInnerHTML={{ __html: t("collector.loginInfo") }}
+          />
+        )}
         {/* Source selector */}
         {availableSources.length > 1 && (
           <div className="mb-4">
@@ -356,7 +360,10 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
               {availableSources.map((source) => (
                 <button
                   key={source.name}
-                  onClick={() => setCollectSource(source.name)}
+                  onClick={() => {
+                    setCollectSource(source.name);
+                    if (source.name === "speedyapply") setCollectMaxJobs("");
+                  }}
                   disabled={collecting}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
                     collectSource === source.name
@@ -418,11 +425,11 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         )}
         <div className="flex gap-3 mb-4">
           <input
-            value={collectTitle}
+            value={collectSource === "speedyapply" ? "All FAANG+ and Other jobs" : collectTitle}
             onChange={(e) => setCollectTitle(e.target.value)}
             placeholder={t("collector.jobTitlePlaceholder")}
             className="input-base flex-1"
-            disabled={collecting}
+            disabled={collecting || collectSource === "speedyapply"}
           />
           <input
             type="number"

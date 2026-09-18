@@ -22,6 +22,7 @@ if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from browser_use import BrowserSession
+from cli.speedyapply import SPEEDYAPPLY_URL, fetch_rows as fetch_speedyapply_rows
 
 try:
     import core.shared_config as config
@@ -984,39 +985,6 @@ async def collect_for_title(
     return found
 
 
-SPEEDYAPPLY_URL = "https://github.com/speedyapply/2027-SWE-College-Jobs"
-
-_SPEEDYAPPLY_STOPWORDS = {
-    "the", "for", "and", "or", "intern", "internship", "interns", "a", "an", "of", "to", "in", "with",
-}
-
-_EXTRACT_SPEEDYAPPLY_ROWS_JS = r"""() => {
-  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  const rows = [];
-  for (const table of document.querySelectorAll('table')) {
-    const trs = Array.from(table.querySelectorAll('tr'));
-    if (trs.length < 2) continue;
-    const headers = Array.from(trs[0].querySelectorAll('th,td')).map((c) => clean(c.innerText).toLowerCase());
-    const companyIdx = headers.indexOf('company');
-    const positionIdx = headers.indexOf('position');
-    const locationIdx = headers.indexOf('location');
-    const postingIdx = headers.indexOf('posting');
-    if (companyIdx < 0 || positionIdx < 0 || postingIdx < 0) continue;
-    for (const tr of trs.slice(1)) {
-      const cells = Array.from(tr.querySelectorAll('td'));
-      if (!cells.length) continue;
-      const company = clean(cells[companyIdx]?.querySelector('a')?.innerText || cells[companyIdx]?.innerText || '');
-      const position = clean(cells[positionIdx]?.innerText || '');
-      const location = locationIdx >= 0 ? clean(cells[locationIdx]?.innerText || '') : '';
-      const url = cells[postingIdx]?.querySelector('a')?.href || '';
-      if (!company || !position || !url) continue;
-      rows.push({ company, position, location, url });
-    }
-  }
-  return JSON.stringify(rows);
-}"""
-
-
 _EXTRACT_GENERIC_DETAILS_JS = r"""() => {
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const bodyText = clean(document.body?.innerText || '');
@@ -1047,33 +1015,6 @@ _EXTRACT_GENERIC_DETAILS_JS = r"""() => {
 }"""
 
 
-def _title_matches_speedyapply_position(title: str, position: str) -> bool:
-    """SpeedyApply's real position text is verbose and does not contain the
-    target title as a literal substring (e.g. "Software Engineer: Cloud &
-    Distributed Backend Intern Opportunities for University Students -
-    Redmond" vs a target of "Software Engineer Intern"), so this matches on
-    keyword overlap instead of a substring check. Every significant word of
-    the target title must appear -- requiring only a majority let a shared
-    generic word like "engineer" alone match "Mechanical Engineer Intern"
-    against a "Software Engineer Intern" target. Word-boundary matching
-    (not raw substring) keeps short but meaningful tokens like "ai" from
-    firing inside unrelated words such as "email" or "training".
-    """
-    aliases = {"engineering": "engineer", "development": "developer"}
-    title_words = {
-        aliases.get(w, w)
-        for w in re.findall(r"[a-z]+", title.lower())
-        if w not in _SPEEDYAPPLY_STOPWORDS and len(w) >= 2
-    }
-    if not title_words:
-        return True
-    position_l = position.lower()
-    position_words = {
-        aliases.get(w, w) for w in re.findall(r"[a-z]+", position_l)
-    }
-    return title_words.issubset(position_words)
-
-
 async def collect_speedyapply(
     title: str,
     existing_jobs: dict,
@@ -1083,75 +1024,55 @@ async def collect_speedyapply(
     cancel_flag: dict | None = None,
     run_id: str = "",
 ) -> list[dict]:
-    """Scrape the SpeedyApply GitHub README's internship tables for postings
-    matching `title`. This is a static HTML page with no login and no
-    pagination, so unlike LinkedIn's scroll-and-click collector this is a
-    single page load and one DOM read.
+    """Import all FAANG+ and Other Apply links, without opening job pages.
+
+    ``title`` and ``filters`` remain in the shared collector interface but do
+    not restrict this curated list. A positive max_jobs caps new records.
     """
-    title = _ensure_internship_search_title(title)
-    clear_stale_browser_session_state()
-    browser = BrowserSession(**config.browser_session_kwargs())
+    if _cancel_requested(cancel_flag):
+        return []
+    rows = await fetch_speedyapply_rows()
+    print(f"    📄 Found {len(rows)} Apply links in SpeedyApply's FAANG+ and Other tables")
+    jobs = read_jobs()
     found: list[dict] = []
     found_urls: set[str] = set()
-
-    try:
-        await browser.start()
-        page = await browser.new_page("about:blank")
-        await page.goto(SPEEDYAPPLY_URL)
-        await _wait_for_ready(page, timeout=15)
-        rows = _parse_eval_json(await page.evaluate(_EXTRACT_SPEEDYAPPLY_ROWS_JS), [])
-        print(f"    📄 Found {len(rows)} total rows across SpeedyApply's tables")
-
-        jobs = read_jobs()
-        for row in rows:
-            if _cancel_requested(cancel_flag):
-                print("    🛑 Stop requested — saving progress and leaving SpeedyApply")
-                break
-            if max_jobs > 0 and len(found) >= max_jobs:
-                break
-            position = row.get("position", "")
-            if not _title_matches_speedyapply_position(title, position):
-                continue
-            if _is_internship_search(title) and not _matches_requested_internship_role(title, position):
-                continue
-            url = (row.get("url") or "").strip()
-            company = (row.get("company") or "").strip() or "Unknown"
-            location = (row.get("location") or "").strip()
-            if not url or url in jobs or url in found_urls:
-                continue
-            if _classify_us_location(location, profile) == "non_us":
-                print(f"    ⏭️  Skipped non-US location: {position} — {location}")
-                continue
-
-            now = datetime.now(timezone.utc).isoformat()
-            job = {
-                "url": url,
-                "title": position,
-                "company": company,
-                "location": location,
-                "easy_apply": False,
-                "description": "",
-                "search_title": title,
-                "collected_at": now,
-                "applied_at": None,
-                "error": None,
-                "collection_method": "speedyapply_github_table",
-            }
-            if run_id:
-                job["collection_run_id"] = run_id
-            job.update(_screening_fields(job, profile, description_complete=False))
-            saved, created = atomic_upsert_job(url, job)
-            if not created:
-                continue
-            found_urls.add(url)
-            found.append(saved)
-            print(f"    💾 Saved 1 new job (total this title: {len(found)}) — {position} at {company}")
-    finally:
-        try:
-            await asyncio.wait_for(browser.close(), timeout=15)
-        except Exception as close_err:
-            print(f"    ⚠️  Browser cleanup error: {close_err}")
-
+    for row in rows:
+        if _cancel_requested(cancel_flag):
+            print("    🛑 Stop requested — saved collected SpeedyApply links")
+            break
+        if max_jobs > 0 and len(found) >= max_jobs:
+            break
+        url = row["url"]
+        if url in jobs or url in existing_jobs or url in found_urls:
+            continue
+        job = {
+            "url": url,
+            "title": row["position"],
+            "company": row["company"],
+            "location": row["location"],
+            "easy_apply": False,
+            "description": "",
+            "search_title": "FAANG+ and Other",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "applied_at": None,
+            "error": None,
+            "collection_method": "speedyapply_github_table",
+            "source": "speedyapply",
+            "source_url": SPEEDYAPPLY_URL,
+            "source_section": row["source_section"],
+            "category": row["source_section"],
+            "salary": row["salary"],
+            "posting_age": row["posting_age"],
+        }
+        if run_id:
+            job["collection_run_id"] = run_id
+        job.update(_screening_fields(job, profile, description_complete=False))
+        saved, created = atomic_upsert_job(url, job)
+        if not created:
+            continue
+        found_urls.add(url)
+        found.append(saved)
+        print(f"    💾 Saved 1 new job (total this title: {len(found)}) — {job['title']} at {job['company']}")
     return found
 
 

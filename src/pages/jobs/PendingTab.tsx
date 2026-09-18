@@ -150,13 +150,16 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       setLoading(true);
       markStart("jobs_page_load");
     }
-    const params: Record<string, string | number> = {};
+    // Request the full saved queue, including imports larger than 500 jobs.
+    const params: { status?: string; search?: string; limit: number } = {
+      limit: Math.max(stats.total, 500),
+    };
     // For the pending tab, exclude "applied" unless explicitly filtered
     if (statusFilter) {
       params.status = statusFilter;
     }
     if (searchQuery) params.search = searchQuery;
-    getJobs(params as { status?: string; search?: string })
+    getJobs(params)
       .then((jobsData) => {
         // Filter out applied jobs from this tab (they show in History)
         const filtered = statusFilter
@@ -695,6 +698,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           {job.easy_apply && (
                             <span className="px-2 py-0.5 bg-[#FFF0F3] text-primary rounded-full text-[10px] font-semibold flex-shrink-0">
                               {t("jobItem.easyApply")}
+                            </span>
+                          )}
+                          {job.source_section === "FAANG+" && (
+                            <span className="px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full text-[10px] font-semibold flex-shrink-0">
+                              FAANG+
                             </span>
                           )}
                           {hasTailoredResume && (

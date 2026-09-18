@@ -12,6 +12,7 @@ from backend.core.workday_flow import (
     save_open_questions,
     is_workday_url,
     run_workday_deterministic,
+    _static_fill_passes,
 )
 
 
@@ -154,6 +155,41 @@ class IsWorkdayUrlTests(unittest.TestCase):
 
 
 class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
+    async def test_distinct_workday_steps_with_same_url_continue_to_review(self):
+        steps = iter(['My Information', 'My Experience', 'Application Questions', 'Disclosures', 'Review'])
+        current = {'step': next(steps)}
+        async def surface(*args, **kwargs):
+            return {'step': current['step'], 'formish': True, 'ready': 'complete', 'body_length': 500}
+        async def progress(*args):
+            if current['step'] == 'Review':
+                return {'clicked': False, 'reason': 'final_submit_guard_blocked'}
+            current['step'] = next(steps)
+            return {'clicked': True, 'reason': 'form_continue', 'label': 'Save and Continue', 'url': 'https://acme.myworkdayjobs.com/apply'}
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', new=AsyncMock(return_value={'url': 'https://acme.myworkdayjobs.com/apply'})),
+            patch('backend.core.workday_flow.try_safe_progress_step', side_effect=progress) as advance,
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            result = await _static_fill_passes(object(), {}, '', 8, 1)
+        self.assertEqual(advance.await_count, 5)
+        self.assertEqual(result['surface']['step'], 'Review')
+        self.assertEqual(sum(bool(p['clicked']) for p in result['safe_progress']), 4)
+
+    async def test_cancelled_run_does_not_launch_llm(self):
+        flag = {'cancel_requested': True}
+        with (
+            patch('backend.core.workday_flow._static_fill_passes', new=AsyncMock(return_value={
+                'url': 'https://acme.myworkdayjobs.com/apply', 'requiredEmpty': 1,
+            })) as fill,
+            patch('backend.core.workday_flow._run_llm_cleanup', new=AsyncMock()) as llm,
+        ):
+            await run_workday_deterministic(object(), facts={}, resume_path='', worker_id=1, cancel_flag=flag)
+        self.assertIs(fill.call_args.kwargs['cancel_flag'], flag)
+        llm.assert_not_awaited()
+
     async def test_clean_run_has_no_blockers_and_never_submits(self):
         review = {
             "url": "https://acme.wd1.myworkdayjobs.com/en-US/job/review",

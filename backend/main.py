@@ -803,13 +803,16 @@ async def start_collection(body: CollectRequest):
     if _login_running:
         return {"success": False, "message": "Close the login browser before starting collection"}
 
-    # Kill any leftover browser processes from previous runs
-    _kill_browser_processes()
+    # Static README imports do not need a browser.
+    if body.source != "speedyapply":
+        _kill_browser_processes()
 
     requested_titles = _split_collection_titles(body.title)
     max_jobs = body.max_jobs
     filters = body.filters or {}
     source = body.source or "linkedin"
+    if source == "speedyapply":
+        requested_titles = ["FAANG+ and Other"]
     status_title = (
         requested_titles[0]
         if len(requested_titles) == 1
@@ -835,7 +838,10 @@ async def start_collection(body: CollectRequest):
         # Load profile from the app data dir (set via UI), not the project root
         profile = load_profile()
         jobs = read_jobs()
-        quarantined = collect_jobs.quarantine_legacy_unscreened_jobs(jobs, profile)
+        quarantined = (
+            collect_jobs.quarantine_legacy_unscreened_jobs(jobs, profile)
+            if source != "speedyapply" else 0
+        )
         if quarantined:
             print(f"🛡️ Moved {quarantined} previously unscreened jobs to Manual Review")
         LOGS_DIR.mkdir(exist_ok=True)
@@ -906,7 +912,7 @@ async def start_collection(body: CollectRequest):
                         print(f"  ❌ Error collecting {t}: {e}")
                         break
 
-            if not _collection_status.get("cancel_requested") and (collected_urls_this_run or resumable_urls):
+            if source != "speedyapply" and not _collection_status.get("cancel_requested") and (collected_urls_this_run or resumable_urls):
                 jobs = read_jobs()
                 urls_to_screen = collected_urls_this_run | resumable_urls
                 subset = {u: jobs[u] for u in urls_to_screen if u in jobs}
@@ -1184,7 +1190,8 @@ async def start_applying(body: ApplyRequest):
             print(
                 "Starting Fapply-only queue: navigate to verified application forms, "
                 "reuse deterministic/LLM help for landing and account gates only, "
-                "click Fapply once, verify populated fields, skip failures after 60 seconds, never submit."
+                "verify Fapply fills, advance Workday pages until Review, "
+                "allow 60 seconds for navigation and up to 10 minutes for Workday pages, never submit."
             )
             stats = await run_fapply_queue(pending, profile, cancel_flag=_apply_status)
             print(f"\nFapply queue results: {stats}")

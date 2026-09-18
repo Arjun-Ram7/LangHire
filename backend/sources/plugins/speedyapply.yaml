@@ -1,8 +1,8 @@
 name: speedyapply
 display_name: SpeedyApply SWE Jobs (GitHub)
-version: "1.0.0"
+version: "1.1.0"
 author: langhire
-description: "Community-maintained GitHub list of US software engineering internships, updated daily"
+description: "Import every FAANG+ and Other internship with its direct Apply link from the GitHub README"
 countries: [US]
 website: https://github.com/speedyapply/2027-SWE-College-Jobs
 requires_login: false
@@ -14,8 +14,8 @@ search_url: "https://github.com/speedyapply/2027-SWE-College-Jobs"
 # prompt-driven plugin engine (PluginConfig.render_collection_prompt) is
 # defined in registry.py but nothing in the app actually feeds it to a
 # browser agent -- every plugin's collection_prompt is currently dead code.
-# SpeedyApply's page is a static HTML table, so collect_speedyapply() in
-# cli/collect_jobs.py scrapes it deterministically instead, dispatched by
+# collect_speedyapply() downloads the raw README and reads Posting links
+# without a browser or description fetching, dispatched by
 # `source == "speedyapply"` in backend/main.py's start_collection(). This
 # field only exists because the registry requires it to be present.
 collection_prompt: |

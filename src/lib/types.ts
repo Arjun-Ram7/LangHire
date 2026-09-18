@@ -101,6 +101,8 @@ export interface Job {
   easy_apply: boolean | null;
   status: "pending" | "in_progress" | "applied" | "failed" | "blocked" | "manual_review";
   source?: string;
+  source_section?: "FAANG+" | "Other";
+  category?: "FAANG+" | "Other";
   search_title?: string;
   collected_at?: string;
   applied_at?: string;

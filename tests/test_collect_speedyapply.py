@@ -1,137 +1,94 @@
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-from cli.collect_jobs import _title_matches_speedyapply_position, collect_speedyapply
+from cli.collect_jobs import collect_speedyapply
+from cli.speedyapply import parse_readme
 
 PROFILE = {"country": "US", "visa_sponsorship_needed": True}
+README = '''
+### FAANG+
+| Company | Position | Location | Salary | Posting | Age |
+|---|---|---|---|---|---|
+| <a href="https://company.example"><strong>Big &amp; Co</strong></a> | Firmware Intern | Austin, TX | $50/hr | <a href="https://apply.example/1?a=1&amp;b=2"><img src="badge.png" alt="Apply"/></a> | 1d |
+### Quant
+| Company | Position | Location | Posting | Age |
+|---|---|---|---|---|
+| Quant | Software Intern | NYC | <a href="https://apply.example/quant">Apply</a> | 1d |
+### Other
+| Company | Position | Location | Posting | Age |
+|---|---|---|---|---|
+| <strong>Acme</strong> | Developer Co-Op | Remote - USA | <a href="https://apply.example/2"><img alt="Apply"/></a> | 2d |
+| Closed | Software Intern | Boston, MA | 🔒 | 3d |
+'''
 
 
-class TitleMatchesSpeedyapplyPositionTests(unittest.TestCase):
-    def test_matches_verbose_real_world_position_text(self):
-        # SpeedyApply's real listings are verbose and never contain the
-        # target title as a literal substring.
-        self.assertTrue(
-            _title_matches_speedyapply_position(
-                "Software Engineer Intern",
-                "Software Engineer: Cloud & Distributed Backend Intern Opportunities for University Students - Redmond",
-            )
-        )
+class ParseReadmeTests(unittest.TestCase):
+    def test_extracts_posting_links_from_both_table_shapes(self):
+        rows = parse_readme(README)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["url"], "https://apply.example/1?a=1&b=2")
+        self.assertEqual(rows[0]["company"], "Big & Co")
+        self.assertEqual(rows[0]["salary"], "$50/hr")
+        self.assertEqual(rows[1]["salary"], "")
+        self.assertEqual([r["source_section"] for r in rows], ["FAANG+", "Other"])
+        self.assertEqual(rows[1]["posting_age"], "2d")
 
-    def test_engineering_and_engineer_are_equivalent(self):
-        self.assertTrue(
-            _title_matches_speedyapply_position(
-                "Software Engineering Intern", "Software Engineer Intern"
-            )
-        )
+    def test_missing_section_fails_instead_of_silently_importing_nothing(self):
+        with self.assertRaisesRegex(ValueError, "missing"):
+            parse_readme("GitHub error page")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            parse_readme(README.split("### Other")[0])
 
-    def test_matches_ml_titled_position(self):
-        self.assertTrue(
-            _title_matches_speedyapply_position(
-                "Machine Learning Intern",
-                "Machine Learning Engineer Intern - Applied AI Team",
-            )
-        )
+    def test_escaped_pipe_does_not_shift_apply_column(self):
+        rows = parse_readme(README.replace("Developer Co-Op", r"Developer \| Co-Op"))
+        self.assertEqual(rows[1]["position"], "Developer | Co-Op")
+        self.assertEqual(rows[1]["url"], "https://apply.example/2")
 
-    def test_keeps_short_but_meaningful_acronym(self):
-        # A 2-letter token like "ai" must still count, but only as a whole
-        # word -- not as a substring inside unrelated words like "email".
-        self.assertTrue(
-            _title_matches_speedyapply_position(
-                "AI Engineer Intern",
-                "AI/ML Engineer Intern - Applied Research",
-            )
-        )
-        self.assertFalse(
-            _title_matches_speedyapply_position(
-                "AI Engineer Intern",
-                "Engineer Intern - email support and training tools",
-            )
-        )
-
-    def test_rejects_unrelated_discipline(self):
-        self.assertFalse(
-            _title_matches_speedyapply_position(
-                "Software Engineer Intern",
-                "Mechanical Engineer Intern - Manufacturing",
-            )
-        )
-
-    def test_empty_title_matches_everything(self):
-        self.assertTrue(_title_matches_speedyapply_position("", "Any Position At All"))
+    def test_invalid_application_url_fails(self):
+        with self.assertRaisesRegex(ValueError, "Invalid"):
+            parse_readme(README.replace("https://apply.example/2", "javascript:alert(1)"))
 
 
 class CollectSpeedyapplyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_saves_matching_row_and_skips_non_matching(self):
-        rows = [
-            {
-                "company": "Microsoft",
-                "position": "Software Engineer: Cloud Intern Opportunities for University Students",
-                "location": "Redmond, WA",
-                "url": "https://apply.careers.microsoft.com/careers/job/1",
-            },
-            {
-                "company": "Acme Manufacturing",
-                "position": "Mechanical Engineer Intern",
-                "location": "Detroit, MI",
-                "url": "https://acme.example.com/jobs/2",
-            },
-        ]
+    async def run_collector(self, *, existing=None, max_jobs=0, cancelled=False):
+        rows = parse_readme(README)
         with (
-            patch("cli.collect_jobs.BrowserSession") as MockBrowser,
-            patch("cli.collect_jobs.clear_stale_browser_session_state"),
-            patch("cli.collect_jobs.read_jobs", return_value={}),
-            patch("cli.collect_jobs.atomic_upsert_job") as mock_upsert,
+            patch("cli.collect_jobs.fetch_speedyapply_rows", new=AsyncMock(return_value=rows + rows)) as fetch,
+            patch("cli.collect_jobs.BrowserSession") as browser,
+            patch("cli.collect_jobs.read_jobs", return_value=existing or {}),
+            patch("cli.collect_jobs.atomic_upsert_job", side_effect=lambda url, job: (job, True)) as upsert,
         ):
-            mock_upsert.side_effect = lambda url, job: (job, True)
-            browser_instance = MockBrowser.return_value
-            browser_instance.start = AsyncMock()
-            browser_instance.close = AsyncMock()
-            page = MagicMock()
-            page.goto = AsyncMock()
-            page.evaluate = AsyncMock(return_value=__import__("json").dumps(rows))
-            browser_instance.new_page = AsyncMock(return_value=page)
+            found = await collect_speedyapply(
+                "Software Engineer Intern", existing or {}, PROFILE,
+                max_jobs=max_jobs, cancel_flag={"cancel_requested": cancelled}, run_id="test-run",
+            )
+            browser.assert_not_called()
+            return found, upsert.call_count, fetch.call_count
 
-            with patch("cli.collect_jobs._wait_for_ready", new=AsyncMock(return_value={})):
-                found = await collect_speedyapply("Software Engineer Intern", {}, PROFILE, max_jobs=10)
-
-        self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["company"], "Microsoft")
+    async def test_collects_all_roles_once_without_title_filter_or_browser(self):
+        found, writes, _ = await self.run_collector()
+        self.assertEqual(writes, 2)
+        self.assertEqual([j["title"] for j in found], ["Firmware Intern", "Developer Co-Op"])
+        self.assertEqual(found[0]["collection_run_id"], "test-run")
         self.assertEqual(found[0]["status"], "manual_review")
         self.assertEqual(found[0]["screening_status"], "pending")
-        self.assertEqual(mock_upsert.call_count, 1)
-        self.assertEqual(mock_upsert.call_args.args[0], "https://apply.careers.microsoft.com/careers/job/1")
+        self.assertEqual(found[1]["source_section"], "Other")
 
-    async def test_does_not_resave_already_collected_url(self):
-        rows = [
-            {
-                "company": "Microsoft",
-                "position": "Software Engineer Intern Opportunities",
-                "location": "Redmond, WA",
-                "url": "https://apply.careers.microsoft.com/careers/job/1",
-            },
-        ]
-        existing = {
-            "https://apply.careers.microsoft.com/careers/job/1": {"status": "pending"},
-        }
-        with (
-            patch("cli.collect_jobs.BrowserSession") as MockBrowser,
-            patch("cli.collect_jobs.clear_stale_browser_session_state"),
-            patch("cli.collect_jobs.read_jobs", return_value=dict(existing)),
-            patch("cli.collect_jobs.atomic_upsert_job") as mock_upsert,
-        ):
-            browser_instance = MockBrowser.return_value
-            browser_instance.start = AsyncMock()
-            browser_instance.close = AsyncMock()
-            page = MagicMock()
-            page.goto = AsyncMock()
-            page.evaluate = AsyncMock(return_value=__import__("json").dumps(rows))
-            browser_instance.new_page = AsyncMock(return_value=page)
+    async def test_preserves_existing_jobs_and_limits_only_new_jobs(self):
+        existing = {"https://apply.example/1?a=1&b=2": {"status": "applied"}}
+        found, writes, _ = await self.run_collector(existing=existing, max_jobs=1)
+        self.assertEqual(writes, 1)
+        self.assertEqual(found[0]["url"], "https://apply.example/2")
+        self.assertEqual(existing["https://apply.example/1?a=1&b=2"]["status"], "applied")
 
-            with patch("cli.collect_jobs._wait_for_ready", new=AsyncMock(return_value={})):
-                found = await collect_speedyapply("Software Engineer Intern", existing, PROFILE, max_jobs=10)
+    async def test_honors_explicit_cap(self):
+        found, writes, _ = await self.run_collector(max_jobs=1)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(writes, 1)
 
-        self.assertEqual(found, [])
-        mock_upsert.assert_not_called()
+    async def test_cancelled_run_does_not_fetch_or_write(self):
+        found, writes, fetches = await self.run_collector(cancelled=True)
+        self.assertEqual((found, writes, fetches), ([], 0, 0))
 
 
 if __name__ == "__main__":

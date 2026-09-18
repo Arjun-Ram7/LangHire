@@ -50,6 +50,24 @@ WORKDAY_FACTS = {
 
 
 class StaticAutofillWorkdayTests(unittest.TestCase):
+    def test_workday_required_dropdown_survives_repeated_static_scans(self):
+        page = self.browser.new_page()
+        try:
+            page.route('**/*', lambda route: route.fulfill(body='<button aria-label="Phone Device Type Select One Required" aria-haspopup="listbox">Select One</button>', content_type='text/html'))
+            page.goto('https://example.myworkdayjobs.com/apply')
+            for _ in range(5):
+                result = page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertGreater(result['requiredEmpty'], 0)
+            self.assertTrue(result['needsLlm'])
+            self.assertIsNone(page.locator('button').get_attribute('data-static-abandoned'))
+            self.assertNotEqual(page.locator('button').get_attribute('aria-disabled'), 'true')
+            page.locator('button').evaluate("e => {e.onclick=()=>{ const old=document.querySelector('[role=listbox]'); if(old) old.remove(); else e.insertAdjacentHTML('afterend','<div role=listbox><div role=option>Mobile</div></div>'); };}")
+            page.locator('button').click()
+            page.evaluate(_autofill_script(WORKDAY_FACTS))
+            self.assertEqual(page.locator('[role=listbox]').count(), 1)
+        finally:
+            page.close()
+
     @classmethod
     def setUpClass(cls):
         cls.playwright = sync_playwright().start()

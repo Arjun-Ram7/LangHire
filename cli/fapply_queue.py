@@ -1,10 +1,10 @@
-"""Open real application forms and invoke Fapply once per selected run.
+"""Open application forms, using LangHire for Workday and Fapply elsewhere.
 
 LangHire's deterministic and bounded LLM automation may navigate job landing
 pages and clear sign-in/account gates.  The moment a real application form is
-detected, that automation stops: only the installed Fapply extension may fill
-application fields.  The queue verifies that fields changed, leaves the form
-open for the candidate, and never submits.
+detected, Workday uses deterministic filling followed by LLM cleanup; other
+sites use the installed Fapply extension. The queue advances Workday to Review,
+and leaves the final submission to the candidate.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ try:
         update_job,
     )
     from core.config import load_settings
-    from core.workday_flow import _current_page, _page_url, _wait_for_page_settle
+    from core.workday_flow import _current_page, _page_url, _wait_for_page_settle, run_workday_deterministic, release_review_handoff
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.autofill_facts import load_autofill_facts, run_static_autofill, set_ai_pause_control, wait_while_ai_paused
@@ -53,9 +53,10 @@ except ImportError:
         update_job,
     )
     from backend.core.config import load_settings
-    from backend.core.workday_flow import _current_page, _page_url, _wait_for_page_settle
+    from backend.core.workday_flow import _current_page, _page_url, _wait_for_page_settle, run_workday_deterministic, release_review_handoff
 
 from cli.apply_jobs import _run_apply_preflight, _switch_to_tab
+from cli.workday_pages import is_workday_application, _probe
 
 
 FAPPLY_EXTENSION_ID = "hlmndegihhncfhangpfjpibgiclnffmd"
@@ -729,6 +730,7 @@ async def open_with_fapply(
     worker_id: int,
     *,
     cancel_flag: dict | None = None,
+    deadline: asyncio.Timeout | None = None,
 ) -> str:
     url = str(job.get("url") or "")
     title = str(job.get("title") or "Unknown")
@@ -795,23 +797,60 @@ async def open_with_fapply(
             f"  ✅ [F{worker_id}] Verified application form: "
             f"fields={surface.get('controlCount', 0)} identity={surface.get('identityCount', 0)}"
         )
-        verification = await run_fapply_and_verify(browser)
+        if is_workday_application(current_url):
+            if deadline is not None:
+                # The landing/account phase remains bounded by 60 seconds;
+                # the verified multi-page application gets its own fill budget.
+                deadline.reschedule(asyncio.get_running_loop().time() + 600.0)
+            facts = load_autofill_facts(profile, RESUME_PATH)
+            facts.update(job_title=title, job_company=company)
+            print(f"  🤖 [F{worker_id}] Workday: deterministic fill → LLM → Save and Continue → Review")
+            try:
+                workday = await run_workday_deterministic(
+                    browser, facts=facts, resume_path=RESUME_PATH, worker_id=worker_id,
+                    passes=12, llm_cleanup=True, llm_steps=60, llm_timeout=300.0,
+                    profile=profile, cancel_flag=cancel_flag, ignored_target_ids=baseline_ids,
+                )
+                final_state = await _probe(await _current_page(browser))
+                reached_review = bool(final_state.get("review"))
+                summary = workday.get("summary") or {}
+                reason = None if reached_review else (
+                    (summary.get("llm_cleanup") or {}).get("stop_reason")
+                    or "; ".join(final_state.get("blockers", []) + final_state.get("errors", []))
+                    or "Workday has not reached Review; remaining steps need attention"
+                )
+                update_job(
+                    url, status="manual_review", error=reason,
+                    manual_review_at=datetime.now(timezone.utc).isoformat(),
+                    manual_review_url=await _page_url(browser),
+                    manual_review_summary={**summary, "workday": {"engine": "langhire", "reached_review": reached_review}},
+                    manual_review_notes=(preflight.get("notes") or [])[-12:],
+                )
+                print(f"  📄 [F{worker_id}] {reason or 'Workday Review reached; ready for your final submission'}")
+                return "workday_review_ready" if reached_review else "workday_needs_input"
+            finally:
+                await release_review_handoff(browser)
+        else:
+            verification = await run_fapply_and_verify(browser)
         current_url = await _page_url(browser)
         summary = {"fapply": {**verification, "surface": decision}}
-        if verification.get("verified"):
+        if verification.get("verified") or "reached_review" in verification:
             update_job(
                 url,
                 status="manual_review",
-                error=None,
+                error=(verification.get("reason") if verification.get("reached_review") is False else None),
                 manual_review_at=datetime.now(timezone.utc).isoformat(),
                 manual_review_url=current_url,
                 manual_review_summary=summary,
                 manual_review_notes=(preflight.get("notes") or [])[-12:],
             )
             print(
-                f"  ✅ [F{worker_id}] Fapply verified: populated "
-                f"{int(verification.get('filled_by_fapply') or 0)} field(s); tab left open"
+                f"  ✅ [F{worker_id}] Fapply result: populated "
+                f"{int(verification.get('filled_by_fapply') or 0)} field(s); "
+                f"{verification.get('reason') or 'tab left open'}"
             )
+            if "reached_review" in verification:
+                return "workday_review_ready" if verification["reached_review"] else "workday_needs_input"
             return "fapply_verified"
 
         reason = str(verification.get("reason") or "Fapply did not produce verifiable field changes")
@@ -855,16 +894,15 @@ async def _run_job_with_deadline(
 ) -> str:
     """Bound one selected job so a stalled site cannot stop the batch."""
     try:
-        return await asyncio.wait_for(
-            open_with_fapply(
+        async with asyncio.timeout(max(0.01, min(60.0, timeout_seconds))) as deadline:
+            return await open_with_fapply(
                 browser,
                 job,
                 profile,
                 worker_id,
                 cancel_flag=cancel_flag,
-            ),
-            timeout=max(0.01, min(60.0, timeout_seconds)),
-        )
+                deadline=deadline if timeout_seconds >= 60.0 else None,
+            )
     except TimeoutError:
         url = str(job.get("url") or "")
         title = str(job.get("title") or "Unknown")
@@ -874,7 +912,7 @@ async def _run_job_with_deadline(
             current_url = await asyncio.wait_for(_page_url(browser), timeout=2.0)
         except Exception:
             pass
-        reason = "Fapply attempt exceeded the 60-second per-job limit; skipped to the next job"
+        reason = "Fapply timed out (60 seconds for navigation, up to 10 minutes for Workday pages); tab left open"
         update_job(
             url,
             status="failed",
@@ -934,8 +972,9 @@ async def run_fapply_queue(
     await browser.start()
     print(
         f"Fapply queue ready for {len(selected)} job(s). Deterministic navigation first; "
-        "bounded account/navigation help when needed; Fapply alone fills application fields; "
-        "60 seconds maximum per job; failures skip forward; no final submissions.\n"
+        "bounded account/navigation help when needed; Fapply fills non-Workday forms; "
+        "60 seconds for navigation; Workday uses LangHire deterministic + LLM filling to Review (10 minute limit); "
+        "failures skip forward; no final submissions.\n"
     )
     stats: dict[str, int] = {}
     for index, job in enumerate(selected, start=1):
