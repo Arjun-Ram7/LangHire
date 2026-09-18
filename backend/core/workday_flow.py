@@ -659,6 +659,7 @@ async def _static_fill_passes(
     seen_progress_clicks: dict[str, int] = {}
     last_surface: dict = {}
     fill_counters: dict = {}
+    control_retries = 0
     for idx in range(max(1, passes)):
         await wait_while_ai_paused(browser, cancel_flag, worker_id)
         if cancel_flag and cancel_flag.get("cancel_requested"):
@@ -768,7 +769,21 @@ async def _static_fill_passes(
                     "url": progress_entry["url"],
                 })
                 break
+        if progress.get("clicked"):
+            control_retries = 0
         if not progress.get("clicked"):
+            # Right after Save and Continue the next page can be on screen without its footer for
+            # a moment. "No control" with nothing blank then is a page still rendering, not the end
+            # of the form; giving up here handed the run to the AI mid-application.
+            if (
+                progress.get("reason") == "no_safe_progress_control"
+                and control_retries < 4
+                and idx < max(1, passes) - 1
+            ):
+                control_retries += 1
+                seen_signatures[signature] -= 1  # a retry of the same state is not a loop
+                await asyncio.sleep(1.5)
+                continue
             if (
                 (
                     progress.get("reason") == "no_safe_progress_control"

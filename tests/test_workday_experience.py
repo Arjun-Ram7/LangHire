@@ -4,6 +4,7 @@ from backend.core.workday_experience import (
     choose_work_row,
     degree_option_rank,
     dropdown_answer,
+    education_field_updates,
     education_plan,
     parse_experience_text,
     phone_type_rank,
@@ -243,3 +244,30 @@ def test_yes_no_options_match_exactly_not_by_prefix():
     assert max(options, key=lambda o: option_rank("No", o)) == "No"
     assert option_rank("Yes", "Select One") == 0
     assert option_rank("No", "Not sure") < option_rank("No", "No")
+
+
+PLAN = {"school": "Virginia Tech", "degree": "Bachelor of Science in Computer Science", "major": "Computer Science",
+        "gpa": "3.71", "first_year": "2024", "last_year": "2028"}
+
+
+def _edu_row(**over):
+    return {"school": "Virginia Tech", "degree": "Bachelor of Science (B.S)", "fieldSelected": 1,
+            "gpa": "3.71", "firstYear": "2024", "lastYear": "2028", **over}
+
+
+def test_a_correct_education_row_needs_no_changes():
+    assert education_field_updates(PLAN, _edu_row()) == []
+
+
+def test_saved_wrong_values_from_an_earlier_run_are_corrected():
+    # A previous run saved these to Workday's draft; only blank fields used to be filled,
+    # so a wrong degree or graduation year stayed forever.
+    row = _edu_row(degree="Bachelor of Arts (B.A)", lastYear="2027", gpa="3.5", school="Virginia Polytechnic")
+
+    assert education_field_updates(PLAN, row) == ["school", "degree", "gpa", "last_year"]
+
+
+def test_blank_fields_are_filled_and_a_close_degree_is_not_churned():
+    row = _edu_row(school="", gpa="", firstYear="", degree="Bachelor of Science (B.S)")
+
+    assert education_field_updates(PLAN, row) == ["school", "gpa", "first_year"]

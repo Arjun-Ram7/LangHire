@@ -454,8 +454,27 @@ async def _pick_option(browser, wanted: list[str], rank) -> bool:
     return await _click_option(browser, best["index"])
 
 
+def education_field_updates(plan: dict[str, str], row: dict[str, Any]) -> list[str]:
+    """Fields of the Education row to (re)type, in fill order. Blank fields are filled and a
+    value that differs from the candidate's facts is corrected: an earlier run's answer is saved
+    in Workday's draft, so leaving non-blank values alone kept a wrong degree or year forever."""
+    updates = []
+    if plan["school"] and _norm(row["school"]) != _norm(plan["school"]):
+        updates.append("school")
+    # Any "Bachelor of Science ..." option is right for a B.S.; only a lesser match is corrected.
+    if plan["degree"] and degree_option_rank(plan["degree"], row["degree"]) < 20:
+        updates.append("degree")
+    if plan["gpa"] and row["gpa"] != plan["gpa"]:
+        updates.append("gpa")
+    if plan["first_year"] and row["firstYear"] != plan["first_year"]:
+        updates.append("first_year")
+    if plan["last_year"] and row["lastYear"] != plan["last_year"]:
+        updates.append("last_year")
+    return updates
+
+
 async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> dict[str, Any]:
-    """Fill the first Education row's blank fields; never overwrites a value or deletes a row."""
+    """Fill or correct the first Education row from the candidate's facts; never deletes a row."""
     section = (await _state(browser)).get("Education")
     if section is None:
         return {"skipped": "no education section"}
@@ -470,15 +489,16 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
         if not rows:
             return {"failed": ["Education row did not appear"]}
     row, row_id, filled = rows[0], rows[0]["id"], []
+    updates = education_field_updates(plan, row)
 
-    if plan["school"] and not row["school"]:
+    if "school" in updates:
         await _type(browser, _field(row_id, "schoolName", "input"), plan["school"])
         await asyncio.sleep(0.8)
         # Some tenants turn the school box into a search list; take the best match if one opened.
         wanted = _norm(plan["school"])
         await _pick_option(browser, [plan["school"]], lambda text: 2 if _norm(text) == wanted else int(wanted in _norm(text)))
         filled.append("school")
-    if plan["degree"] and not row["degree"]:
+    if "degree" in updates:
         if await _click(browser, _field(row_id, "degree", "button")):
             await asyncio.sleep(0.6)
             if await _pick_option(browser, [plan["degree"]], lambda text: degree_option_rank(plan["degree"], text)):
@@ -495,11 +515,11 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
                 await asyncio.sleep(0.4)
             else:
                 await _press(browser, "Escape")
-    if plan["gpa"] and not row["gpa"]:
+    if "gpa" in updates:
         if await _type(browser, _field(row_id, "gradeAverage", "input"), plan["gpa"]):
             filled.append("gpa")
-    for field, key, state_key in (("firstYearAttended", "first_year", "firstYear"), ("lastYearAttended", "last_year", "lastYear")):
-        if plan[key] and not row[state_key]:
+    for field, key in (("firstYearAttended", "first_year"), ("lastYearAttended", "last_year")):
+        if key in updates:
             if await _click(browser, _field(row_id, field, '[data-automation-id="dateSectionYear-display"]')):
                 await _key_events(browser, plan[key])
                 filled.append(key)

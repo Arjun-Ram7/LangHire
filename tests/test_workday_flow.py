@@ -325,6 +325,54 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             await _fill_deterministic_widgets(object(), {'age_over_18': 'yes'}, '', 3, {}, 'Application Questions', {})
         self.assertEqual(seen, [({'age_over_18': 'yes'}, 3)])
 
+    async def test_a_page_still_rendering_is_retried_not_treated_as_the_end_of_the_form(self):
+        # Live: right after Save and Continue the next page had no footer button for a moment,
+        # the probe said no_safe_progress_control with nothing blank, the loop gave up, and the
+        # (credit-less) AI took over and abandoned the job before Self Identify.
+        steps = iter(['My Experience', 'Application Questions', 'Review'])
+        current = {'step': next(steps)}
+        replies = iter([
+            {'clicked': False, 'reason': 'no_safe_progress_control'},
+            {'clicked': False, 'reason': 'no_safe_progress_control'},
+            {'clicked': True, 'reason': 'form_continue', 'label': 'Save and Continue', 'url': 'u1'},
+            {'clicked': False, 'reason': 'final_submit_guard_blocked'},
+        ])
+        async def surface(*args, **kwargs):
+            return {'step': current['step'], 'formish': True, 'ready': 'complete', 'body_length': 500, 'input_count': 3, 'button_count': 4}
+        async def progress(*args):
+            reply = next(replies)
+            if reply['clicked']:
+                current['step'] = next(steps)
+            return reply
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', new=AsyncMock(return_value={'url': 'u'})),
+            patch('backend.core.workday_flow.try_safe_progress_step', side_effect=progress),
+            patch('backend.core.workday_flow._fill_deterministic_widgets', new=AsyncMock()),
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            result = await _static_fill_passes(object(), {}, '', 8, 1)
+        self.assertEqual(sum(bool(p['clicked']) for p in result['safe_progress']), 1)
+        self.assertEqual(result['surface']['step'], 'Application Questions')
+
+    async def test_a_form_that_never_shows_a_continue_button_still_ends(self):
+        async def surface(*args, **kwargs):
+            return {'step': 'My Experience', 'formish': True, 'ready': 'complete', 'body_length': 500, 'input_count': 3, 'button_count': 4}
+        advance = AsyncMock(return_value={'clicked': False, 'reason': 'no_safe_progress_control'})
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', new=AsyncMock(return_value={'url': 'u'})),
+            patch('backend.core.workday_flow.try_safe_progress_step', new=advance),
+            patch('backend.core.workday_flow._fill_deterministic_widgets', new=AsyncMock()),
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            await _static_fill_passes(object(), {}, '', 12, 1)
+        self.assertLessEqual(advance.await_count, 5)
+
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
         with (

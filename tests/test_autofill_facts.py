@@ -12,6 +12,7 @@ from backend.core.autofill_facts import (
     _submit_guard_script,
     load_autofill_facts,
     _default_facts,
+    _notify_workday_human_checkpoint,
     _workday_human_checkpoint_script,
     wait_for_workday_human_checkpoint,
 )
@@ -161,6 +162,25 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
             page.close()
 
         self.assertEqual(checked, ["dis-no"])
+
+    PREVIOUS_WORKER = """<div data-automation-id="formField-candidateIsPreviousWorker" data-fkit-id="previousWorker--candidateIsPreviousWorker"><fieldset><legend><label id="radio-label1"><span>Have you previously been employed by WEX Inc.?
+
+**CURRENT EMPLOYEES: Please apply via your internal Workday account instead.**<abbr aria-hidden="true">*</abbr></span></label></legend><div><div><div name="candidateIsPreviousWorker" aria-labelledby="radio-label1" id="previousWorker--candidateIsPreviousWorker" aria-required="true"><div><div><input id="r8pe4" name="candidateIsPreviousWorker" type="radio" aria-checked="false" value="true"><span></span><div><div></div></div></div><label cursor="default" for="r8pe4">Yes</label></div><div><div><input id="r8pe5" name="candidateIsPreviousWorker" type="radio" aria-checked="false" value="false"><span></span><div><div></div></div></div><label cursor="default" for="r8pe5">No</label></div></div></div><div></div></div></fieldset></div>"""
+
+    def test_previously_employed_yes_no_radios_end_on_no_after_a_single_pass(self):
+        # Live: after pass one "Yes" was left checked (pass two then corrected it, but the
+        # loop had already moved on). The generic choice sweep hands the matcher the container's
+        # combined text "yes no", and "no" is a substring match, so it clicked the first option.
+        facts = {**self.OWN_FACTS, "previously_worked_for_company": "no"}
+        page = self.browser.new_page()
+        try:
+            page.set_content(self.PREVIOUS_WORKER)
+            page.evaluate(_autofill_script(facts))
+            checked = page.evaluate("() => Array.from(document.querySelectorAll('input')).map(i => [i.value, i.checked])")
+        finally:
+            page.close()
+
+        self.assertEqual(checked, [["true", False], ["false", True]])
 
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
@@ -1761,3 +1781,52 @@ class FactDerivationTests(unittest.TestCase):
 
         self.assertEqual(facts["age"], "20")
         self.assertEqual(facts["age_over_18"], "yes")
+
+
+class HumanCheckpointNotificationTests(unittest.IsolatedAsyncioTestCase):
+    """The click-needed alert must focus LangHire's own browser, never launch another one."""
+
+    async def run_notify(self, pid):
+        calls = []
+
+        class FakeProcess:
+            returncode = 0
+            async def communicate(self):
+                return b"", b""
+
+        async def fake_exec(*args, **_kwargs):
+            calls.append(args)
+            return FakeProcess()
+
+        with (
+            patch("backend.core.autofill_facts.os.uname", return_value=type("U", (), {"sysname": "Darwin"})()),
+            patch("backend.core.autofill_facts.os.name", "posix"),
+            patch("backend.core.autofill_facts._automation_browser_pid", return_value=pid),
+            patch("backend.core.autofill_facts.asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("backend.core.autofill_facts.asyncio.sleep", new=AsyncMock()),
+        ):
+            await _notify_workday_human_checkpoint("Create Account")
+        return calls
+
+    async def test_never_launches_chrome_for_testing(self):
+        # It ran `open -b com.google.chrome.for.testing`, which starts that app if it is not
+        # running: every Create Account / Sign In page popped open a stray Chrome for Testing.
+        calls = await self.run_notify(4242)
+
+        flat = " ".join(" ".join(map(str, call)) for call in calls)
+        self.assertNotIn("chrome.for.testing", flat)
+        self.assertNotIn("Google Chrome for Testing", flat)
+        self.assertFalse([call for call in calls if call[0] == "open"])
+
+    async def test_focuses_the_automation_browser_by_process_id(self):
+        calls = await self.run_notify(4242)
+
+        script = next(call[2] for call in calls if call[0] == "osascript")
+        self.assertIn("unix id is 4242", script)
+
+    async def test_without_a_known_browser_it_only_notifies(self):
+        calls = await self.run_notify(None)
+
+        script = next(call[2] for call in calls if call[0] == "osascript")
+        self.assertNotIn("frontmost", script)
+        self.assertIn("display notification", script)

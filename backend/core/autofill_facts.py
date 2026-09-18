@@ -2477,6 +2477,10 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }}
 
   function customFieldMatch(optionText, groupText) {{
+    // A container holding both choices ("yes no") is not one option. The answer
+    // matchers test "no" as a substring, so it matched and the sweep then clicked
+    // the first choice, leaving "Yes" on a question whose fact is No.
+    if (/\\byes\\b/.test(optionText) && /\\bno\\b/.test(optionText)) return '';
     if (matchesAuthorizedToWork(optionText, groupText)) return 'authorized_to_work_us';
     if (matchesVisaStatus(optionText, groupText)) return 'visa_status';
     if (matchesCptStatus(optionText, groupText)) return 'cpt_status';
@@ -4342,34 +4346,46 @@ async def probe_workday_human_checkpoint(browser: Any) -> dict[str, Any]:
         }
 
 
+def _automation_browser_pid() -> int | None:
+    """Main process of LangHire's own automation browser (the one started on its profile)."""
+    try:
+        import psutil
+
+        try:
+            from core.shared_config import BROWSER_PROFILE_DIR
+        except ImportError:
+            from backend.core.shared_config import BROWSER_PROFILE_DIR
+        profile = str(BROWSER_PROFILE_DIR)
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            command = process.info.get("cmdline") or []
+            if any(part == f"--user-data-dir={profile}" for part in command) and not any(
+                part.startswith("--type=") for part in command
+            ):
+                return int(process.info["pid"])
+    except Exception:
+        pass
+    return None
+
+
 async def _notify_workday_human_checkpoint(action: str) -> bool:
-    """Focus the handoff window, ring once, and send a native notification."""
+    """Focus the automation browser, ring once, and send a native notification.
+
+    Focus is by process id on the browser LangHire already started. This must never launch an
+    application: it used to `open -b` a hardcoded Chrome for Testing, which started a stray
+    copy of that app on every Create Account / Sign In page.
+    """
     if os.name != "posix" or not hasattr(os, "uname") or os.uname().sysname != "Darwin":
         return False
     safe_action = "Sign In" if action == "Sign In" else "Create Account"
     title = "LangHire needs one click"
     message = f"Click {safe_action} in Workday. LangHire will resume automatically."
-    try:
-        open_process = await asyncio.create_subprocess_exec(
-            "open",
-            "-b",
-            "com.google.chrome.for.testing",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(open_process.communicate(), timeout=5.0)
-        await asyncio.sleep(1.25)
-    except Exception:
-        pass
-    apple_script = f"""
-tell application "System Events"
-  if exists process "Google Chrome for Testing" then
-    set frontmost of process "Google Chrome for Testing" to true
-  else if exists process "Chromium" then
-    set frontmost of process "Chromium" to true
-  end if
-end tell
-display notification {json.dumps(message)} with title {json.dumps(title)}
+    pid = _automation_browser_pid()
+    focus = (
+        f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true\n'
+        if pid
+        else ""
+    )
+    apple_script = f"""{focus}display notification {json.dumps(message)} with title {json.dumps(title)}
 """
     try:
         notification_process = await asyncio.create_subprocess_exec(
