@@ -178,6 +178,46 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['surface']['step'], 'Review')
         self.assertEqual(sum(bool(p['clicked']) for p in result['safe_progress']), 4)
 
+    async def test_my_experience_step_fills_history_and_education_before_static_autofill(self):
+        steps = iter(['My Information', 'My Experience', 'Review'])
+        current = {'step': next(steps)}
+        calls = []
+        async def surface(*args, **kwargs):
+            return {'step': current['step'], 'formish': True, 'ready': 'complete', 'body_length': 500}
+        async def progress(*args):
+            if current['step'] == 'Review':
+                return {'clicked': False, 'reason': 'final_submit_guard_blocked'}
+            current['step'] = next(steps)
+            return {'clicked': True, 'reason': 'form_continue', 'label': 'Save and Continue', 'url': 'u'}
+        async def static(*args, **kwargs):
+            calls.append(('static', current['step']))
+            return {'url': 'u'}
+        async def history(browser, entries, worker_id=0):
+            calls.append(('history', current['step']))
+            return {}
+        async def education(browser, plan, worker_id=0):
+            calls.append(('education', current['step']))
+            return {}
+        entries = [{'title': 'Intern', 'company': 'Acme'}]
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', side_effect=static),
+            patch('backend.core.workday_flow.try_safe_progress_step', side_effect=progress),
+            patch('backend.core.workday_flow.load_work_experience', return_value=entries) as load,
+            patch('backend.core.workday_flow.fill_work_history', side_effect=history),
+            patch('backend.core.workday_flow.fill_education', side_effect=education),
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            await _static_fill_passes(object(), {'school': 'Virginia Tech'}, '/tmp/resume.pdf', 8, 1)
+        load.assert_called_once_with('/tmp/resume.pdf')
+        self.assertEqual(
+            [c for c in calls if c[1] == 'My Experience'],
+            [('history', 'My Experience'), ('education', 'My Experience'), ('static', 'My Experience')],
+        )
+        self.assertFalse([c for c in calls if c[0] != 'static' and c[1] != 'My Experience'])
+
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
         with (

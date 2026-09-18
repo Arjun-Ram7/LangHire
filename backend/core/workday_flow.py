@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from urllib.parse import urlparse
 
 from browser_use import Agent, BrowserSession
@@ -33,6 +34,7 @@ try:
         wait_for_workday_human_checkpoint,
         wait_while_ai_paused,
     )
+    from core.workday_experience import education_plan, fill_education, fill_work_history, load_work_experience
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
@@ -49,6 +51,12 @@ except ImportError:
         try_safe_progress_step,
         wait_for_workday_human_checkpoint,
         wait_while_ai_paused,
+    )
+    from backend.core.workday_experience import (
+        education_plan,
+        fill_education,
+        fill_work_history,
+        load_work_experience,
     )
 
 
@@ -585,6 +593,18 @@ async def _wait_for_visible_surface(browser: BrowserSession, timeout: float = 14
     return last
 
 
+async def _fill_experience_step(browser: BrowserSession, facts: dict, resume_path: str, worker_id: int) -> None:
+    """Add the resume's work history and the education row; the static pass only handles single fields."""
+    try:
+        entries = load_work_experience(resume_path)
+        if entries:
+            await fill_work_history(browser, entries, worker_id)
+        await fill_education(browser, education_plan(facts), worker_id)
+    except Exception as exc:
+        # The static pass and LLM cleanup still run; a failure here must not end the application.
+        print(f"    ⚠️  [W{worker_id}] Work history/education fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
+
+
 async def _static_fill_passes(
     browser: BrowserSession,
     facts: dict,
@@ -603,6 +623,8 @@ async def _static_fill_passes(
         if cancel_flag and cancel_flag.get("cancel_requested"):
             break
         last_surface = await _wait_for_visible_surface(browser, timeout=12.0 if idx == 0 else 5.0)
+        if re.search(r"my experience", str(last_surface.get("step") or ""), re.I):
+            await _fill_experience_step(browser, facts, resume_path, worker_id)
         review = await run_static_autofill(
             browser,
             facts,
