@@ -34,7 +34,7 @@ try:
         wait_for_workday_human_checkpoint,
         wait_while_ai_paused,
     )
-    from core.workday_experience import education_plan, fill_education, fill_work_history, load_work_experience
+    from core.workday_experience import education_plan, fill_education, fill_work_history, load_work_experience, with_locations
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
@@ -57,6 +57,7 @@ except ImportError:
         fill_education,
         fill_work_history,
         load_work_experience,
+        with_locations,
     )
 
 
@@ -593,10 +594,12 @@ async def _wait_for_visible_surface(browser: BrowserSession, timeout: float = 14
     return last
 
 
-async def _fill_experience_step(browser: BrowserSession, facts: dict, resume_path: str, worker_id: int) -> None:
+async def _fill_experience_step(
+    browser: BrowserSession, facts: dict, resume_path: str, worker_id: int, profile: dict | None = None
+) -> None:
     """Add the resume's work history and the education row; the static pass only handles single fields."""
     try:
-        entries = load_work_experience(resume_path)
+        entries = with_locations(load_work_experience(resume_path), profile or {})
         if entries:
             await fill_work_history(browser, entries, worker_id)
         await fill_education(browser, education_plan(facts), worker_id)
@@ -612,6 +615,7 @@ async def _static_fill_passes(
     passes: int,
     worker_id: int,
     cancel_flag: dict | None = None,
+    profile: dict | None = None,
 ) -> dict:
     review: dict = {}
     safe_progress: list[dict] = []
@@ -624,7 +628,7 @@ async def _static_fill_passes(
             break
         last_surface = await _wait_for_visible_surface(browser, timeout=12.0 if idx == 0 else 5.0)
         if re.search(r"my experience", str(last_surface.get("step") or ""), re.I):
-            await _fill_experience_step(browser, facts, resume_path, worker_id)
+            await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
         review = await run_static_autofill(
             browser,
             facts,
@@ -1278,7 +1282,9 @@ async def run_workday_deterministic(
     review: dict = {}
     progress_made = False
     try:
-        review = await _static_fill_passes(browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag)
+        review = await _static_fill_passes(
+            browser, facts, resume_path, passes, worker_id, cancel_flag=cancel_flag, profile=profile
+        )
         progress_made = True
 
         summary_before_cleanup = _summarize_review(review)

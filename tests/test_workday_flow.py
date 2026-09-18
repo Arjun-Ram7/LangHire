@@ -194,10 +194,12 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             return {'url': 'u'}
         async def history(browser, entries, worker_id=0):
             calls.append(('history', current['step']))
+            seen_entries.extend(entries)
             return {}
         async def education(browser, plan, worker_id=0):
             calls.append(('education', current['step']))
             return {}
+        seen_entries = []
         entries = [{'title': 'Intern', 'company': 'Acme'}]
         with (
             patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
@@ -210,8 +212,12 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
             patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
         ):
-            await _static_fill_passes(object(), {'school': 'Virginia Tech'}, '/tmp/resume.pdf', 8, 1)
+            await _static_fill_passes(
+                object(), {'school': 'Virginia Tech'}, '/tmp/resume.pdf', 8, 1,
+                profile={'work_locations': {'Acme': 'Reston, VA'}},
+            )
         load.assert_called_once_with('/tmp/resume.pdf')
+        self.assertEqual(seen_entries[0]['location'], 'Reston, VA')
         self.assertEqual(
             [c for c in calls if c[1] == 'My Experience'],
             [('history', 'My Experience'), ('education', 'My Experience'), ('static', 'My Experience')],

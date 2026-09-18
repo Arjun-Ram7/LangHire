@@ -143,6 +143,28 @@ def load_work_experience(resume_path: str) -> list[dict[str, Any]]:
     return parse_experience_text(text)
 
 
+def with_locations(entries: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Add a Location to each entry. The resume does not state one, so it comes from the
+    profile's `work_locations` (employer name -> place) or, for a role at the candidate's
+    own university, their home city. Anything else stays blank; a place is never guessed."""
+    known = {
+        _norm(name): str(place).strip()
+        for name, place in (profile.get("work_locations") or {}).items()
+        if str(name).strip() and str(place).strip()
+    }
+    address = profile.get("address") or {}
+    home = ", ".join(part for part in (str(address.get("city") or "").strip(), str(address.get("state") or "").strip()) if part)
+    school = _norm((profile.get("education") or {}).get("school", ""))
+    located = []
+    for entry in entries:
+        company = _norm(entry["company"])
+        place = next((where for name, where in known.items() if name in company), "")
+        if not place and school and company == school:
+            place = home
+        located.append({**entry, "location": place})
+    return located
+
+
 def _year(value: object) -> str:
     match = re.search(r"\b(?:19|20)\d{2}\b", str(value or ""))
     return match.group(0) if match else ""
@@ -204,6 +226,7 @@ _STATE_JS = r"""(() => {
         id: row.getAttribute('data-fkit-id'),
         title: val(row, 'input[name="jobTitle"]'),
         company: val(row, 'input[name="companyName"]'),
+        location: val(row, 'input[name="location"]'),
         current: !!row.querySelector('input[name="currentlyWorkHere"]')?.checked,
         startMonth: date(row, 'startDate', 'Month'), startYear: date(row, 'startDate', 'Year'),
         endMonth: date(row, 'endDate', 'Month'), endYear: date(row, 'endDate', 'Year'),
@@ -342,6 +365,8 @@ async def _fill_work_row(browser, row: dict[str, Any], entry: dict[str, Any]) ->
         touched |= await _type(browser, _field(row_id, "jobTitle", "input"), entry["title"])
     if not row["company"]:
         touched |= await _type(browser, _field(row_id, "companyName", "input"), entry["company"])
+    if entry.get("location") and not row["location"]:
+        touched |= await _type(browser, _field(row_id, "location", "input"), entry["location"])
     if entry["current"] and not row["current"]:
         touched |= await _click(browser, _field(row_id, "currentlyWorkHere", 'input[type="checkbox"]'))
     if not (row["startMonth"] and row["startYear"]):

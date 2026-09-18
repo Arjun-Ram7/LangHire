@@ -2,6 +2,7 @@ from backend.core.workday_experience import (
     degree_option_rank,
     education_plan,
     parse_experience_text,
+    with_locations,
 )
 
 RESUME = """ARJUN RAMACHANDRAN
@@ -110,3 +111,32 @@ def test_workday_degree_list_picks_bachelor_of_science_not_a_lookalike_row():
     degree = "Bachelor of Science in Computer Science"
 
     assert max(options, key=lambda o: degree_option_rank(degree, o)) == "Bachelor of Science (B.S)"
+
+
+PROFILE = {
+    "address": {"city": "Blacksburg", "state": "Virginia"},
+    "education": {"school": "Virginia Tech"},
+    "work_locations": {"BITS Pilani": "Dubai, United Arab Emirates", "emax": "Dubai, UAE"},
+}
+
+
+def _job(company, title="Intern"):
+    return {"title": title, "company": company}
+
+
+def test_location_comes_from_the_profile_map_by_company_name():
+    jobs = with_locations([_job("BITS Pilani, Dubai Campus"), _job("EMAX (Landmark Group)")], PROFILE)
+
+    assert [j["location"] for j in jobs] == ["Dubai, United Arab Emirates", "Dubai, UAE"]
+
+
+def test_a_role_at_the_candidates_own_university_is_located_in_their_home_city():
+    jobs = with_locations([_job("Virginia Tech", "Undergraduate Researcher, ChainSentinel")], PROFILE)
+
+    assert jobs[0]["location"] == "Blacksburg, Virginia"
+
+
+def test_unknown_employer_is_left_blank_rather_than_guessed():
+    jobs = with_locations([_job("Marsh McLennan (Mercer Marsh Benefits)")], PROFILE)
+
+    assert jobs[0]["location"] == ""
