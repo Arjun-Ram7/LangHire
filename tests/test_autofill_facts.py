@@ -126,6 +126,42 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
         self.assertEqual((values["jt"], values["co"], values["loc"]), ("", "", ""))
 
+    SELF_IDENTIFY = """
+    <div data-automation-id="formField-name" data-fkit-id="selfIdentifiedDisabilityData--name">
+      <label for="selfIdentifiedDisabilityData--name"><span>Name<abbr>*</abbr></span></label>
+      <input type="text" id="selfIdentifiedDisabilityData--name" name="name" aria-required="true" value=""></div>
+    <div data-automation-id="formField-employeeId" data-fkit-id="selfIdentifiedDisabilityData--employeeId">
+      <label for="selfIdentifiedDisabilityData--employeeId">Employee ID (if applicable)</label>
+      <input type="text" id="selfIdentifiedDisabilityData--employeeId" name="employeeId" aria-required="false" value=""></div>
+    <fieldset data-automation-id="disabilityStatus-CheckboxGroup" id="selfIdentifiedDisabilityData--disabilityStatus">
+      <div><input id="dis-yes" type="checkbox"><label for="dis-yes">Yes, I have a disability, or have had one in the past</label></div>
+      <div><input id="dis-no" type="checkbox"><label for="dis-no">No, I do not have a disability and have not had one in the past</label></div>
+      <div><input id="dis-skip" type="checkbox"><label for="dis-skip">I do not want to answer</label></div>
+    </fieldset>
+    """
+
+    def test_self_identify_name_is_the_candidates_name_and_employee_id_stays_blank(self):
+        # Live run: both boxes were filled with the disability answer "No" because
+        # the form's own id ("selfIdentifiedDisabilityData--name") contains "disability".
+        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+
+        _result, values = self.run_fixture(self.SELF_IDENTIFY, facts)
+
+        self.assertEqual(values["selfIdentifiedDisabilityData--name"], "Arjun Ramachandran")
+        self.assertEqual(values["selfIdentifiedDisabilityData--employeeId"], "")
+
+    def test_self_identify_checks_the_no_disability_box(self):
+        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+        page = self.browser.new_page()
+        try:
+            page.set_content(self.SELF_IDENTIFY)
+            page.evaluate(_autofill_script(facts))
+            checked = page.evaluate("() => Array.from(document.querySelectorAll('input:checked')).map(e => e.id)")
+        finally:
+            page.close()
+
+        self.assertEqual(checked, ["dis-no"])
+
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
             """

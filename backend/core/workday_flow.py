@@ -35,7 +35,7 @@ try:
         wait_while_ai_paused,
     )
     from core.config import load_profile
-    from core.workday_experience import education_plan, fill_education, fill_work_history, load_work_experience, with_locations
+    from core.workday_experience import education_plan, fill_education, fill_signature_dates, fill_work_history, load_work_experience, with_locations
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import LOGS_DIR
@@ -57,6 +57,7 @@ except ImportError:
     from backend.core.workday_experience import (
         education_plan,
         fill_education,
+        fill_signature_dates,
         fill_work_history,
         load_work_experience,
         with_locations,
@@ -637,6 +638,10 @@ async def _static_fill_passes(
                 await _fill_experience_step(browser, facts, resume_path, worker_id, profile)
         else:
             experience_fills = 0
+        try:
+            await fill_signature_dates(browser, worker_id)
+        except Exception as exc:
+            print(f"    ⚠️  [W{worker_id}] Signature date fill skipped: {type(exc).__name__}: {str(exc)[:160]}")
         review = await run_static_autofill(
             browser,
             facts,

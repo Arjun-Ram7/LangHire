@@ -1457,6 +1457,11 @@ def _autofill_script(facts: dict[str, str]) -> str:
     // Matching "Job Title"/"Company"/"Location" here overwrites them with the
     // candidate's own current role, employer and city.
     if (el.closest?.('[data-fkit-id^="workExperience-"]')) return ['', ''];
+    // Workday's CC-305 self-identification form: its element ids all contain
+    // "disability", so the disability rule below wrote "No" into both of these.
+    // Name is the signature (the candidate's own); Employee ID is optional.
+    if (/^selfIdentifiedDisabilityData--name$/.test(el.id || '')) return ['full_name', facts.full_name];
+    if (/^selfIdentifiedDisabilityData--employeeId$/.test(el.id || '')) return ['', ''];
     text = preferPrimaryFieldText(el, text);
     const type = norm(el.type);
     if (el.tagName === 'TEXTAREA') {{

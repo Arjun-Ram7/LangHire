@@ -1,4 +1,5 @@
-"""Deterministic Workday "My Experience" filling: work-history rows and education.
+"""Deterministic Workday filling for widgets the static autofill cannot drive: the
+My Experience rows (work history, education) and date spin-buttons.
 
 Workday builds this page from repeatable rows (Add / Add Another) whose date
 widgets are React spin-buttons, so it needs trusted key events and a row-aware
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -504,3 +506,40 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
     if filled:
         print(f"    🎓 [W{worker_id}] Education: {', '.join(filled)}")
     return {"filled": filled}
+
+
+def signature_date_parts(today: date) -> tuple[str, str, str]:
+    return f"{today.month:02d}", f"{today.day:02d}", str(today.year)
+
+
+_EMPTY_DATES_JS = r"""(() => {
+  const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+  return Array.from(document.querySelectorAll('[data-automation-id^="formField-"]'))
+    .filter(field => {
+      const label = clean(field.querySelector('label')?.innerText).replace(/\*$/, '').trim();
+      const part = name => field.querySelector(`input[data-automation-id="dateSection${name}-input"]`);
+      return /^date( signed)?$/i.test(label) && part('Month') && part('Day') && part('Year')
+        && !part('Month').value && !part('Day').value && !part('Year').value;
+    })
+    .map(field => field.getAttribute('data-automation-id'));
+})()"""
+
+
+async def fill_signature_dates(browser, worker_id: int = 0, today: date | None = None) -> int:
+    """Type today's date into any empty full-date "Date" box (the signature on
+    Voluntary Disclosures / Self Identify). No fact exists for it, so nothing else fills it."""
+    month, day, year = signature_date_parts(today or date.today())
+    filled = 0
+    for field in await _eval(browser, _EMPTY_DATES_JS) or []:
+        done = True
+        for part, digits in (("Month", month), ("Day", day), ("Year", year)):
+            selector = json.dumps(f'[data-automation-id="{field}"] [data-automation-id="dateSection{part}-display"]')
+            display = f"document.querySelector({selector})"
+            if await _click(browser, display):
+                await _key_events(browser, digits)
+            else:
+                done = False
+        filled += done
+    if filled:
+        print(f"    📅 [W{worker_id}] Signature date: {month}/{day}/{year}")
+    return filled

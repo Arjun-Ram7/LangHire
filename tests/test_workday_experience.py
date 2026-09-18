@@ -1,8 +1,11 @@
+from datetime import date
+
 from backend.core.workday_experience import (
     choose_work_row,
     degree_option_rank,
     education_plan,
     parse_experience_text,
+    signature_date_parts,
     with_locations,
 )
 
@@ -171,3 +174,8 @@ def test_rows_never_grow_past_the_entry_count():
     rows = [_row(str(i), f"T{i}", f"C{i}") for i in range(5)]
 
     assert choose_work_row(rows, ENTRY, 0, 5) == ("full", None)
+
+
+def test_signature_date_is_todays_date_as_zero_padded_month_day_year():
+    assert signature_date_parts(date(2026, 9, 8)) == ("09", "08", "2026")
+    assert signature_date_parts(date(2026, 12, 25)) == ("12", "25", "2026")

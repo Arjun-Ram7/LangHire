@@ -264,6 +264,30 @@ class RunWorkdayDeterministicTests(unittest.IsolatedAsyncioTestCase):
             await _static_fill_passes(object(), {}, '/tmp/r.pdf', 6, 1, profile={})
         self.assertEqual(len(calls), 2)
 
+    async def test_empty_signature_dates_are_filled_on_every_pass_before_the_static_fill(self):
+        # Self Identify's required Date has no fact behind it; a live run stalled on
+        # "The field Date is required" until the AI typed it by hand.
+        order = []
+        async def surface(*args, **kwargs):
+            return {'step': 'Self Identify', 'formish': True, 'ready': 'complete', 'body_length': 500}
+        async def dates(browser, worker_id=0):
+            order.append('dates')
+            return 1
+        async def static(*args, **kwargs):
+            order.append('static')
+            return {'url': 'u'}
+        with (
+            patch('backend.core.workday_flow._wait_for_visible_surface', side_effect=surface),
+            patch('backend.core.workday_flow.run_static_autofill', side_effect=static),
+            patch('backend.core.workday_flow.try_safe_progress_step', new=AsyncMock(return_value={'clicked': False, 'reason': 'final_submit_guard_blocked'})),
+            patch('backend.core.workday_flow.fill_signature_dates', side_effect=dates),
+            patch('backend.core.workday_flow.wait_while_ai_paused', new=AsyncMock()),
+            patch('backend.core.workday_flow._wait_for_page_settle', new=AsyncMock()),
+            patch('backend.core.workday_flow.asyncio.sleep', new=AsyncMock()),
+        ):
+            await _static_fill_passes(object(), {}, '', 1, 1)
+        self.assertEqual(order, ['dates', 'static'])
+
     async def test_cancelled_run_does_not_launch_llm(self):
         flag = {'cancel_requested': True}
         with (
