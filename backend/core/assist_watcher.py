@@ -4,19 +4,24 @@ autofill on a tab when the candidate presses Resume, even after the run that ope
 Runs finish and leave their tabs open for the candidate. Without this the control disappeared
 with the run, so a page the candidate wanted the AI to fill again had no way to ask for it.
 
-Watching is done with a plain Playwright connection. A browser-use session manages tabs for its
-agent (it recreates "missing" ones and reuses blank ones), so it is only opened for the few
-minutes an assist takes and never held while the candidate is just browsing.
+Watching is done over one small DevTools connection per tab, every call with a deadline, so a
+stalled tab (or a stalled connection) is dropped on its own instead of freezing the watcher. A
+browser-use session manages tabs for its agent (it recreates "missing" ones and reuses blank
+ones), so it is only opened for the few minutes an assist takes.
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
+import urllib.request
 from typing import Any, Callable
 
 from browser_use import BrowserSession
 
 try:
+    from core.cdp_tab import CdpTab
     from core.autofill_facts import (
         _automation_browser_pid,
         _focus_pause_target,
@@ -28,6 +33,7 @@ try:
     from core.shared_config import RESUME_PATH
     from core.workday_flow import fill_current_page, is_workday_url, run_workday_deterministic
 except ImportError:
+    from backend.core.cdp_tab import CdpTab
     from backend.core.autofill_facts import (
         _automation_browser_pid,
         _focus_pause_target,
@@ -38,6 +44,9 @@ except ImportError:
     from backend.core.config import load_profile
     from backend.core.shared_config import RESUME_PATH
     from backend.core.workday_flow import fill_current_page, is_workday_url, run_workday_deterministic
+
+
+_log = logging.getLogger("langhire.assist")
 
 
 def plan_tab_action(state: dict[str, Any] | None) -> str:
@@ -91,70 +100,85 @@ async def _assist(browser: BrowserSession, target_id: str, url: str, cancel_flag
     await release_review_handoff(browser)
 
 
-class PlaywrightPoller:
-    """Reads and sets the control on every http(s) tab over a light Playwright connection."""
+async def _list_targets(endpoint: str) -> list[dict[str, Any]]:
+    def fetch() -> list[dict[str, Any]]:
+        with urllib.request.urlopen(f"{endpoint}/json/list", timeout=4) as response:  # noqa: S310 (loopback)
+            return json.loads(response.read().decode())
 
-    def __init__(self) -> None:
-        self._pw: Any = None
-        self._browser: Any = None
+    return await asyncio.wait_for(asyncio.to_thread(fetch), 6)
+
+
+def _value(reply: Any) -> Any:
+    return ((reply or {}).get("result") or {}).get("value")
+
+
+class RawCdpPoller:
+    """Reads and sets the control on every http(s) tab, one DevTools connection per tab."""
+
+    def __init__(self, list_targets: Callable[..., Any] = _list_targets, open_tab: Callable[..., Any] = CdpTab.open) -> None:
+        self._list_targets = list_targets
+        self._open_tab = open_tab
         self._endpoint: str | None = None
-        self._init_scripted: set[int] = set()
-        self._pages: dict[str, Any] = {}
+        self._tabs: dict[str, tuple[Any, str]] = {}
 
     async def connect(self) -> bool:
         endpoint = automation_browser_endpoint()
         if not endpoint:
             return False
-        from playwright.async_api import async_playwright
-
-        self._pw = await async_playwright().start()
-        try:
-            self._browser = await asyncio.wait_for(self._pw.chromium.connect_over_cdp(endpoint), 20)
-        except Exception:
-            await self.close()
-            raise
         self._endpoint = endpoint
-        self._init_scripted.clear()
-        self._pages.clear()
         return True
 
+    async def _drop(self, key: str) -> None:
+        entry = self._tabs.pop(key, None)
+        if entry is not None:
+            await entry[0].close()
+
+    async def _poll(self, key: str, target: dict[str, Any]) -> tuple[str, str, dict[str, Any] | None]:
+        url = str(target.get("url") or "")
+        try:
+            entry = self._tabs.get(key)
+            if entry is None or not entry[0].alive:
+                tab = await self._open_tab(target["webSocketDebuggerUrl"])
+                # Runs the control's script on every navigation and on the page's first load.
+                await tab.call("Page.addScriptToEvaluateOnNewDocument", {"source": _pause_control_overlay_script()})
+                self._tabs[key] = (tab, url)
+            tab = self._tabs[key][0]
+            # Idempotent: installs, or re-mounts a removed panel, and reports the state.
+            state = _value(await tab.call(
+                "Runtime.evaluate", {"expression": _pause_control_overlay_script(), "returnByValue": True}
+            ))
+            return key, url, state if isinstance(state, dict) else None
+        except Exception:
+            await self._drop(key)
+            return key, url, None
+
     async def tabs(self) -> list[tuple[str, str, dict[str, Any] | None]]:
-        out: list[tuple[str, str, dict[str, Any] | None]] = []
-        self._pages = {}
-        for context in self._browser.contexts:
-            if id(context) not in self._init_scripted:
-                # Re-installs the control after every navigation and on every tab opened later.
-                await context.add_init_script(_pause_control_overlay_script())
-                self._init_scripted.add(id(context))
-            for page in context.pages:
-                if not page.url.startswith(("http://", "https://")):
-                    continue
-                key = str(id(page))
-                self._pages[key] = page
-                # Idempotent: installs, or re-mounts a removed panel, and reports the state.
-                state = await page.evaluate(_pause_control_overlay_script())
-                out.append((key, page.url, state if isinstance(state, dict) else None))
-        return out
+        targets = await self._list_targets(self._endpoint)
+        wanted = {
+            str(t["id"]): t
+            for t in targets
+            if t.get("type") == "page"
+            and str(t.get("url") or "").startswith(("http://", "https://"))
+            and t.get("webSocketDebuggerUrl")
+        }
+        for key in [key for key in self._tabs if key not in wanted]:
+            await self._drop(key)
+        return list(await asyncio.gather(*(self._poll(key, target) for key, target in wanted.items())))
 
     async def set_paused(self, key: str, paused: bool) -> None:
-        page = self._pages.get(key)
-        if page is not None and not page.is_closed():
-            await page.evaluate(_pause_control_overlay_script(paused))
+        entry = self._tabs.get(key)
+        if entry is not None and entry[0].alive:
+            await entry[0].call(
+                "Runtime.evaluate", {"expression": _pause_control_overlay_script(paused), "returnByValue": True}
+            )
 
     async def assist(self, key: str, url: str, cancel_flag: dict) -> None:
-        page = self._pages.get(key)
-        if page is None or self._endpoint is None:
+        if self._endpoint is None:
             return
-        cdp = await page.context.new_cdp_session(page)
-        try:
-            info = await cdp.send("Target.getTargetInfo")
-        finally:
-            await cdp.detach()
-        target_id = str(info["targetInfo"]["targetId"])
         browser = BrowserSession(cdp_url=self._endpoint, keep_alive=True)
         await asyncio.wait_for(browser.start(), 20)
         try:
-            await _assist(browser, target_id, url, cancel_flag)
+            await _assist(browser, key, url, cancel_flag)  # the target id is the /json/list id
         finally:
             try:
                 await asyncio.wait_for(browser.stop(), 5)  # keep_alive: leaves the browser running
@@ -162,19 +186,8 @@ class PlaywrightPoller:
                 pass
 
     async def close(self) -> None:
-        browser, pw = self._browser, self._pw
-        self._browser = self._pw = None
-        self._pages = {}
-        try:
-            if browser is not None:
-                await asyncio.wait_for(browser.close(), 5)  # connected over CDP: only disconnects
-        except Exception:
-            pass
-        try:
-            if pw is not None:
-                await asyncio.wait_for(pw.stop(), 5)
-        except Exception:
-            pass
+        for key in list(self._tabs):
+            await self._drop(key)
 
 
 class AssistWatcher:
@@ -187,7 +200,7 @@ class AssistWatcher:
         tick_timeout: float = 60.0,
     ) -> None:
         self.is_busy = is_busy
-        self.poller = poller or PlaywrightPoller()
+        self.poller = poller or RawCdpPoller()
         self.interval = interval
         self.tick_timeout = tick_timeout
         self.connected = False
@@ -203,7 +216,7 @@ class AssistWatcher:
         try:
             await self.poller.assist(key, url, flag)
         except Exception as exc:
-            print(f"  ⚠️  Resume AI autofill stopped: {type(exc).__name__}: {str(exc)[:160]}")
+            _log.warning("Resume AI autofill stopped: %s: %s", type(exc).__name__, str(exc)[:160])
         finally:
             self.assisting.discard(key)
             self.cancel_flags.pop(key, None)
@@ -242,16 +255,36 @@ class AssistWatcher:
                 asyncio.create_task(self._run_assist(key, url))
 
     async def run_forever(self) -> None:
+        beat = 0.0
         while True:
+            task = asyncio.ensure_future(self.tick())
             try:
-                await asyncio.wait_for(self.tick(), self.tick_timeout)
-            except asyncio.TimeoutError:
-                # A browser call hung (a dropped CDP connection can do that): start over next tick.
-                await self._disconnect()
+                done, _pending = await asyncio.wait({task}, timeout=self.tick_timeout)
+                if not done:
+                    # Do not await the cancelled tick: something that ignores cancellation must
+                    # not be able to stall the loop (that is how the last watcher froze).
+                    task.cancel()
+                    _log.warning("assist tick timed out; reconnecting")
+                    self.connected = False
+                    asyncio.ensure_future(self._safe_close())
+                else:
+                    task.result()
             except asyncio.CancelledError:
-                await self._disconnect()
+                task.cancel()
+                await self._safe_close()
                 raise
             except Exception as exc:
-                print(f"  ⚠️  Assist watcher error: {type(exc).__name__}: {str(exc)[:160]}")
-                await self._disconnect()
+                _log.warning("assist watcher error: %s: %s", type(exc).__name__, str(exc)[:160])
+                self.connected = False
+                asyncio.ensure_future(self._safe_close())
+            now = asyncio.get_running_loop().time()
+            if now - beat >= 300:
+                beat = now
+                _log.info("assist watcher alive: connected=%s assisting=%d", self.connected, len(self.assisting))
             await asyncio.sleep(self.interval)
+
+    async def _safe_close(self) -> None:
+        try:
+            await asyncio.wait_for(self.poller.close(), 5)
+        except BaseException:
+            pass

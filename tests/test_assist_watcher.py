@@ -201,3 +201,97 @@ class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
         one_page.assert_awaited_once()
         wizard.assert_not_awaited()
         release.assert_awaited_once()
+
+
+class FakeCdpTab:
+    def __init__(self, target_id, log, fail=False):
+        self.target_id, self.log, self.fail = target_id, log, fail
+        self.alive = True
+        self.state = {"installed": True, "paused": False, "userChanged": False}
+
+    async def call(self, method, params=None, timeout=5.0):
+        self.log.append((self.target_id, method))
+        if self.fail:
+            self.alive = False
+            raise RuntimeError("stalled")
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "object", "value": dict(self.state)}}
+        return {}
+
+    async def close(self):
+        self.alive = False
+
+
+class RawCdpPollerTests(unittest.IsolatedAsyncioTestCase):
+    def poller(self, targets, tabs=None):
+        self.log = []
+        self.tabs = tabs if tabs is not None else {}
+        self.targets = targets
+
+        async def list_targets(_endpoint):
+            return self.targets
+
+        async def open_tab(ws_url):
+            target_id = ws_url.rsplit("/", 1)[-1]
+            tab = self.tabs.get(target_id) or FakeCdpTab(target_id, self.log)
+            self.tabs[target_id] = tab
+            return tab
+
+        poller = assist_watcher.RawCdpPoller(list_targets=list_targets, open_tab=open_tab)
+        poller._endpoint = "http://127.0.0.1:1"
+        return poller
+
+    @staticmethod
+    def target(target_id, url, kind="page"):
+        return {"id": target_id, "type": kind, "url": url, "webSocketDebuggerUrl": f"ws://x/devtools/page/{target_id}"}
+
+    async def test_only_http_pages_are_tracked_and_each_gets_the_init_script_once(self):
+        poller = self.poller([
+            self.target("A", "https://a.example/apply"), self.target("B", "chrome://settings"),
+            self.target("C", "https://c.example/", kind="service_worker"),
+        ])
+
+        first = await poller.tabs()
+        second = await poller.tabs()
+
+        self.assertEqual([(key, url) for key, url, _ in first], [("A", "https://a.example/apply")])
+        self.assertEqual(first[0][2], {"installed": True, "paused": False, "userChanged": False})
+        self.assertEqual(len(second), 1)
+        self.assertEqual([m for t, m in self.log if m == "Page.addScriptToEvaluateOnNewDocument"], ["Page.addScriptToEvaluateOnNewDocument"])
+
+    async def test_a_stalled_tab_is_dropped_without_hiding_the_others(self):
+        bad = FakeCdpTab("BAD", [], fail=True)
+        poller = self.poller([self.target("BAD", "https://bad.example/"), self.target("OK", "https://ok.example/")], {"BAD": bad})
+
+        tabs = await poller.tabs()
+
+        by_key = {key: state for key, _url, state in tabs}
+        self.assertIsNone(by_key["BAD"])
+        self.assertTrue(by_key["OK"]["installed"])
+        self.assertNotIn("BAD", poller._tabs)
+
+    async def test_a_tab_that_closes_is_forgotten(self):
+        poller = self.poller([self.target("A", "https://a.example/"), self.target("B", "https://b.example/")])
+        await poller.tabs()
+        gone = self.tabs["B"]
+
+        self.targets = [self.target("A", "https://a.example/")]
+        tabs = await poller.tabs()
+
+        self.assertEqual([key for key, _u, _s in tabs], ["A"])
+        self.assertFalse(gone.alive)
+
+    async def test_set_paused_evaluates_the_control_script_on_that_tab(self):
+        poller = self.poller([self.target("A", "https://a.example/")])
+        await poller.tabs()
+
+        await poller.set_paused("A", True)
+
+        self.assertEqual(self.log[-1], ("A", "Runtime.evaluate"))
+
+    async def test_connect_is_false_when_the_automation_browser_is_not_running(self):
+        poller = self.poller([])
+        with patch.object(assist_watcher, "automation_browser_endpoint", return_value=None):
+            self.assertFalse(await poller.connect())
+        with patch.object(assist_watcher, "automation_browser_endpoint", return_value="http://127.0.0.1:9"):
+            self.assertTrue(await poller.connect())
