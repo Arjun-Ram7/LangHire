@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _MONTHS = {
     name: f"{index:02d}"
@@ -337,17 +338,35 @@ async def _type_date(browser, row_id: str, field: str, month: str, year: str) ->
             await _key_events(browser, digits)
 
 
-async def _visible_options(browser) -> list[dict[str, Any]]:
-    return await _eval(browser, r"""(() => Array.from(document.querySelectorAll(
-      '[role="option"], [data-automation-id="menuItem"], [data-automation-id="promptOption"]'
-    )).filter(e => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; })
-      .map((e, index) => ({ index, text: String(e.innerText || '').replace(/\s+/g, ' ').trim() })))()""") or []
+_OPTION_SELECTOR = '[role="option"], [data-automation-id="menuItem"], [data-automation-id="promptOption"]'
 
 
-async def _click_option(browser, index: int) -> bool:
-    return await _click(browser, f"""Array.from(document.querySelectorAll(
-      '[role="option"], [data-automation-id="menuItem"], [data-automation-id="promptOption"]'
-    )).filter(e => {{ const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; }})[{index}]""")
+def options_expr(anchor: str | None) -> str:
+    """JS expression for the option elements of the popup that is open.
+
+    Other widgets keep hidden lists (Country Phone Code's "United States of America (+1)" rows, the
+    State list), so with an `anchor` element the popup nearest to it is used, not every list on the page.
+    """
+    return f"""(() => {{
+  const shown = e => {{ const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; }};
+  let popups = Array.from(document.querySelectorAll('[role="listbox"], [data-automation-id="activeListContainer"]')).filter(shown);
+  const anchor = {anchor or 'null'};
+  if (anchor && popups.length > 1) {{
+    const a = anchor.getBoundingClientRect();
+    const distance = p => {{ const r = p.getBoundingClientRect(); return Math.abs(r.top - a.bottom) + Math.abs((r.left + r.width / 2) - (a.left + a.width / 2)) / 4; }};
+    popups = [popups.sort((x, y) => distance(x) - distance(y))[0]];
+  }}
+  const roots = popups.length ? popups : [document];
+  return roots.flatMap(root => Array.from(root.querySelectorAll('{_OPTION_SELECTOR}'))).filter(shown);
+}})()"""
+
+
+async def _visible_options(browser, anchor: str | None = None) -> list[dict[str, Any]]:
+    return await _eval(browser, f"""{options_expr(anchor)}.map((e, index) => ({{ index, text: String(e.innerText || '').replace(/\\s+/g, ' ').trim() }}))""") or []
+
+
+async def _click_option(browser, index: int, anchor: str | None = None) -> bool:
+    return await _click(browser, f"{options_expr(anchor)}[{index}]")
 
 
 async def _wait_rows(browser, section: str, count: int, timeout: float = 5.0) -> dict[str, Any]:
@@ -624,10 +643,28 @@ def dropdown_answer(question: str, facts: dict[str, Any]) -> str | None:
     return None
 
 
+_GENERIC_INTEREST = (
+    "I am a computer science student looking for a software engineering internship where I can build "
+    "reliable software with real users and learn from an experienced team."
+)
+
+
 def text_answer(question: str, facts: dict[str, Any]) -> str | None:
     text = _norm(question)
-    if any(phrase in text for phrase in ("salary expectation", "desired salary", "desired pay", "expected salary", "compensation expectation")):
+    if any(phrase in text for phrase in (
+        "salary expectation", "salary range", "desired salary", "desired pay", "expected salary",
+        "compensation expectation", "pay expectation",
+    )):
         return str(facts.get("desired_pay") or "").strip() or None
+    if any(phrase in text for phrase in ("available to start", "start date", "when can you start", "earliest start")):
+        return str(facts.get("earliest_start_date") or "").strip() or None
+    if "best way to contact" in text or "preferred method of contact" in text or "preferred contact" in text:
+        return "Email"
+    if any(phrase in text for phrase in (
+        "looking for new opportunities", "why are you interested", "why do you want to work", "why this company",
+        "why are you looking", "interest in this role",
+    )):
+        return str(facts.get("interest_statement") or "").strip() or _GENERIC_INTEREST
     return None
 
 
@@ -636,26 +673,87 @@ def option_rank(wanted: str, option: str) -> int:
     return 2 if _norm(option) == _norm(wanted) else 0
 
 
+_HEAR_UNSAFE = ("select one", "referral", "internal", "employee", "agency", "recruiter", "recruiting", "fair", "event")
+_PHONE_CODE_ROW = re.compile(r"\(\+\d+\)")
+
+
+def hear_pick(options: list[str], rng: random.Random | None = None) -> str | None:
+    """Answer "How did you hear about us?": LinkedIn if offered, otherwise any harmless option.
+
+    Referral, internal and agency options ask for a name, "Other" asks for text, and the stray
+    "(+1)" rows belong to the Country Phone Code list, so none of those is ever chosen at random.
+    """
+    rng = rng or random.Random()
+    real = [o for o in options if _norm(o) and _norm(o) != "select one" and not _PHONE_CODE_ROW.search(o)]
+    for option in real:
+        if "linkedin" in _norm(option):
+            return option
+    pool = [o for o in real if _norm(o) != "other" and not any(word in _norm(o) for word in _HEAR_UNSAFE)]
+    if pool:
+        return rng.choice(pool)
+    return real[0] if real else None
+
+
+def veteran_option_rank(fact: str, option: str) -> int:
+    """Rank a Workday veteran-status option against the candidate's fact; 0 is never chosen.
+
+    "I identify as ..." options claim service, so they are never picked for a non-veteran, and
+    "I am not a protected veteran" / "I am not a veteran" are the answer.
+    """
+    wanted, text = _norm(fact), _norm(option)
+    if "not a veteran" in wanted or "not a protected veteran" in wanted:
+        if "identify as" in text:
+            return 0
+        if text.startswith("i am not a protected veteran") or text.startswith("i am not a veteran"):
+            return 3
+        return 2 if "not a protected veteran" in text or "not a veteran" in text else 0
+    if any(word in wanted for word in ("prefer not", "decline", "do not wish", "don t wish")):
+        return 3 if any(word in text for word in ("do not wish", "don t wish", "decline", "prefer not")) else 0
+    return 0
+
+
+def is_hear_question(question: str) -> bool:
+    return "hear about" in _norm(question)
+
+
+def dropdown_choice(question: str, facts: dict[str, Any]) -> Callable[[str], int] | None:
+    """How to pick an option for a dropdown question: a ranking of option texts, or None if unknown."""
+    text = _norm(question)
+    if is_hear_question(question):
+        return None  # picked with hear_pick, which needs the whole list at once
+    if "veteran" in text and "have you" not in text:
+        fact = str(facts.get("veteran_status") or "")
+        return (lambda option: veteran_option_rank(fact, option)) if fact else None
+    answer = dropdown_answer(question, facts)
+    if answer:
+        return lambda option: option_rank(answer, option)
+    return None
+
+
 _QUESTIONS_JS = r"""(() => {
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
   const visible = el => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  const selected = field => { const m = clean(field.querySelector('[data-automation-id="promptAriaInstruction"]')?.innerText).match(/(\d+)\s+items?\s+selected/i); return m ? Number(m[1]) : 0; };
   const out = [];
   for (const field of document.querySelectorAll('[data-automation-id^="formField-"]')) {
+    const id = field.getAttribute('data-automation-id');
+    const fkit = field.getAttribute('data-fkit-id') || '';
+    if (/^(workExperience|education)-/.test(fkit) || field.closest('[data-fkit-id^="workExperience-"], [data-fkit-id^="education-"]')) continue;
     const question = clean((field.querySelector('legend') || field.querySelector('label'))?.innerText).replace(/\*\s*$/, '');
     const button = field.querySelector('button[aria-haspopup="listbox"]');
     if (button) {
       if (visible(button) && /^select/i.test(clean(button.innerText))) out.push({ kind: 'select', selector: '#' + CSS.escape(button.id), question });
       continue;
     }
-    if (field.getAttribute('data-automation-id') === 'formField-countryPhoneCode') {
-      const chosen = clean(field.querySelector('[data-automation-id="promptAriaInstruction"]')?.innerText).match(/(\d+)\s+items?\s+selected/i);
+    if (field.querySelector('[data-automation-id="multiSelectContainer"]')) {
       const input = field.querySelector('input');
-      if (input && visible(input) && !(chosen && Number(chosen[1]))) out.push({ kind: 'phone_code', selector: '#' + CSS.escape(input.id), question });
+      if (!input || !visible(input) || selected(field)) continue;
+      out.push({ kind: id === 'formField-countryPhoneCode' ? 'phone_code' : 'hear_multi', selector: '#' + CSS.escape(input.id), question });
       continue;
     }
-    if ((field.getAttribute('data-fkit-id') || '').startsWith('primaryQuestionnaire--')) {
-      const box = field.querySelector('textarea, input[type="text"]');
-      if (box && visible(box) && !box.value) out.push({ kind: 'text', selector: '#' + CSS.escape(box.id), question });
+    const box = field.querySelector('textarea, input[type="text"]');
+    if (box && visible(box) && !box.value && !box.readOnly && !box.disabled) {
+      out.push({ kind: 'text', selector: '#' + CSS.escape(box.id), question });
     }
   }
   return out;
@@ -666,6 +764,21 @@ def _phone_code_rank(text: str) -> int:
     # "United States of America (+1)": the +1 must be the country itself, not an island territory.
     norm = _norm(text)
     return 2 if norm.startswith("united states of america") and "1" in norm else 0
+
+
+async def _open_and_pick(browser, element: str, choose: Callable[[list[str]], str | None]) -> str | None:
+    """Open the widget, choose one of its options by text with `choose`, click it. Returns the text."""
+    if not await _click(browser, element):
+        return None
+    await asyncio.sleep(0.7)
+    options = await _visible_options(browser, element)
+    picked = choose([option["text"] for option in options])
+    if picked is not None:
+        index = next((option["index"] for option in options if option["text"] == picked), None)
+        if index is not None and await _click_option(browser, index, element):
+            return picked
+    await _press(browser, "Escape")
+    return None
 
 
 async def fill_workday_questions(browser, facts: dict[str, Any], worker_id: int = 0) -> int:
@@ -679,20 +792,32 @@ async def fill_workday_questions(browser, facts: dict[str, Any], worker_id: int 
         element = f"document.querySelector({json.dumps(item['selector'])})"
         kind, question = item["kind"], item["question"]
         if kind == "select":
-            wanted = dropdown_answer(question, facts)
-            if not wanted or not await _click(browser, element):
-                continue
-            await asyncio.sleep(0.6)
-            if await _pick_option(browser, [wanted], lambda text: option_rank(wanted, text)):
-                filled += 1
-                print(f"    ✅ [W{worker_id}] {question[:60]}: {wanted}")
+            if is_hear_question(question):
+                picked = await _open_and_pick(browser, element, hear_pick)
             else:
-                await _press(browser, "Escape")
+                rank = dropdown_choice(question, facts)
+                if rank is None:
+                    continue
+                picked = await _open_and_pick(
+                    browser, element,
+                    lambda texts: max(texts, key=rank, default=None) if texts and rank(max(texts, key=rank)) > 0 else None,
+                )
+            if picked:
+                filled += 1
+                print(f"    ✅ [W{worker_id}] {question[:60]}: {picked}")
+        elif kind == "hear_multi":
+            if not is_hear_question(question):
+                continue
+            picked = await _open_and_pick(browser, element, hear_pick)
+            if picked:
+                filled += 1
+                await asyncio.sleep(0.4)
+                print(f"    ✅ [W{worker_id}] {question[:60]}: {picked}")
         elif kind == "text":
             answer = text_answer(question, facts)
             if answer and await _type(browser, element, answer, bulk=True):
                 filled += 1
-                print(f"    ✅ [W{worker_id}] {question[:60]}: {answer}")
+                print(f"    ✅ [W{worker_id}] {question[:60]}: {answer[:40]}")
         elif kind == "phone_code" and str(facts.get("phone_country_code") or "+1").strip() == "+1":
             if await _type(browser, element, "United States of America"):
                 await _press(browser, "Enter")  # the search box only filters on Enter

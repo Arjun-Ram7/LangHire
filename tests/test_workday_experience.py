@@ -4,6 +4,10 @@ from backend.core.workday_experience import (
     choose_work_row,
     degree_option_rank,
     dropdown_answer,
+    dropdown_choice,
+    hear_pick,
+    options_expr,
+    is_hear_question,
     education_field_updates,
     education_plan,
     parse_experience_text,
@@ -11,6 +15,7 @@ from backend.core.workday_experience import (
     option_rank,
     signature_date_parts,
     text_answer,
+    veteran_option_rank,
     with_locations,
 )
 
@@ -271,3 +276,94 @@ def test_blank_fields_are_filled_and_a_close_degree_is_not_churned():
     row = _edu_row(school="", gpa="", firstYear="", degree="Bachelor of Science (B.S)")
 
     assert education_field_updates(PLAN, row) == ["school", "gpa", "first_year"]
+
+
+import random
+
+HEAR_OPTIONS = ["Select One", "Career Websites", "Employee Referral", "Internal", "Job Fair/Event",
+                "Recruiting Agency", "Social Media", "Other", "United States of America (+1)"]
+
+
+def test_how_did_you_hear_prefers_linkedin_when_the_list_has_it():
+    assert hear_pick(["Select One", "Facebook", "LinkedIn", "Indeed"], random.Random(0)) == "LinkedIn"
+
+
+def test_how_did_you_hear_otherwise_picks_any_harmless_option_at_random():
+    picks = {hear_pick(HEAR_OPTIONS, random.Random(seed)) for seed in range(40)}
+
+    assert picks <= {"Career Websites", "Social Media"}
+    assert picks, "something must be chosen"
+
+
+def test_how_did_you_hear_never_picks_a_referral_or_a_stray_phone_code():
+    # Referral / internal / agency options ask for a name; the phone-code rows are another widget's list.
+    unsafe = ["Employee Referral", "Internal", "Recruiting Agency", "United States of America (+1)", "Other", "Select One"]
+    for seed in range(60):
+        assert hear_pick(HEAR_OPTIONS, random.Random(seed)) not in unsafe
+
+
+def test_how_did_you_hear_falls_back_to_any_real_option_when_nothing_else_is_left():
+    assert hear_pick(["Select One", "Employee Referral"], random.Random(0)) == "Employee Referral"
+    assert hear_pick(["Select One"], random.Random(0)) is None
+
+
+def test_veteran_options_rank_not_a_veteran_first_and_never_the_ones_that_claim_service():
+    fact = "Not a veteran"
+    options = [
+        "I identify as one or more of the classifications of protected veteran",
+        "I identify as a veteran, just not a protected veteran",
+        "I am not a protected veteran",
+        "I am not a veteran",
+        "I do not wish to self identify",
+    ]
+    ranks = {o: veteran_option_rank(fact, o) for o in options}
+
+    assert ranks["I am not a protected veteran"] > 0 and ranks["I am not a veteran"] > 0
+    assert ranks["I identify as one or more of the classifications of protected veteran"] == 0
+    assert ranks["I identify as a veteran, just not a protected veteran"] == 0
+    assert ranks["I do not wish to self identify"] == 0
+
+
+def test_dropdown_choice_covers_the_questions_workday_asks_on_page_one_and_disclosures():
+    facts = {**FACTS, "veteran_status": "Not a veteran"}
+
+    veteran = dropdown_choice("Veteran Status", facts)
+    assert veteran is not None and veteran("I am not a protected veteran") > veteran("I identify as a veteran, just not a protected veteran")
+    assert dropdown_choice("How Did You Hear About Us?", facts) is None  # chosen from the whole list
+    assert is_hear_question("How Did You Hear About Us?") and not is_hear_question("Veteran Status")
+    worked = dropdown_choice("Have you previously worked for Plexus?", facts)
+    assert worked is not None and worked("No") > worked("Yes")
+    assert dropdown_choice("Favourite colour", facts) is None
+
+
+def test_free_text_questions_are_answered_from_the_facts():
+    facts = {**FACTS, "earliest_start_date": "May 16, 2027", "interest_statement": "I want to build reliable software."}
+
+    assert text_answer("What is your base salary range expectations?", facts) == "Negotiable"
+    assert text_answer("When are you available to start a new position?", facts) == "May 16, 2027"
+    assert text_answer("What is the best way to contact you?", facts) == "Email"
+    assert text_answer("Why are you looking for new opportunities?", facts) == "I want to build reliable software."
+    assert text_answer("Describe your biggest weakness", facts) is None
+
+
+def test_options_belong_to_the_popup_nearest_the_clicked_control_not_to_another_widgets_list():
+    # Live: choosing "How did you hear about us?" clicked "Massachusetts", a row of the State list.
+    from playwright.sync_api import sync_playwright
+
+    html = """
+    <div style="position:absolute; top:100px; left:50px; width:300px; height:40px" id="source">source</div>
+    <ul role="listbox" style="position:absolute; top:150px; left:50px; width:300px; height:80px; margin:0">
+      <li role="option">Career Websites</li><li role="option">Social Media</li></ul>
+    <ul role="listbox" style="position:absolute; top:600px; left:50px; width:300px; height:80px; margin:0">
+      <li role="option">Massachusetts</li><li role="option">Michigan</li></ul>
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+        near = page.evaluate(f"{options_expr('document.getElementById(\"source\")')}.map(e => e.innerText)")
+        anywhere = page.evaluate(f"{options_expr(None)}.map(e => e.innerText)")
+        browser.close()
+
+    assert near == ["Career Websites", "Social Media"]
+    assert set(anywhere) == {"Career Websites", "Social Media", "Massachusetts", "Michigan"}

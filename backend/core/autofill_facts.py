@@ -2153,7 +2153,8 @@ def _autofill_script(facts: dict[str, str]) -> str:
     if (isMaleWord(factText) && isMaleWord(valueText)) return true;
     if (isFemaleWord(factText) && isFemaleWord(valueText)) return true;
     if (factText.includes('he') && valueText.includes('he') && valueText.includes('him')) return true;
-    if (factText.includes('not a veteran') && valueText.includes('not') && valueText.includes('veteran')) return true;
+    // "I identify as a veteran, just not a protected veteran" also has "not" and "veteran": it says the opposite.
+    if (factText.includes('not a veteran') && valueText.includes('not') && valueText.includes('veteran') && !valueText.includes('identify as')) return true;
     if (factText.includes('no') && valueText.includes('do not') && valueText.includes('disability')) return true;
     return false;
   }}

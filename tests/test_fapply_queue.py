@@ -65,6 +65,7 @@ class WorkdayFapplyRoutingTests(unittest.IsolatedAsyncioTestCase):
                 'review': result.get('reached_review', False), 'blockers': [result['reason']] if result.get('reason') else [],
             })),
             patch('cli.fapply_queue.release_review_handoff', new=AsyncMock()) as release,
+            patch('cli.fapply_queue.set_ai_pause_control', new=AsyncMock()),
             patch('cli.fapply_queue.run_fapply_and_verify', new=AsyncMock(return_value=result)) as single,
         ):
             status = await open_with_fapply(browser, {'url': url}, {}, 1, deadline=deadline)
@@ -172,8 +173,10 @@ class FreshBrowserWorkdayTests(unittest.IsolatedAsyncioTestCase):
             patch("cli.fapply_queue._current_page", new=AsyncMock(return_value=object())),
             patch("cli.fapply_queue._probe", new=AsyncMock(return_value={"review": False, "blockers": []})),
             patch("cli.fapply_queue.release_review_handoff", new=AsyncMock()),
+            patch("cli.fapply_queue.set_ai_pause_control", new=AsyncMock()) as pause_control,
         ):
             status = await open_with_fapply(browser, {"url": url}, {}, 1, deadline=MagicMock())
+        self.pause_control = pause_control
         return status, engine, llm_gate, update
 
     async def test_workday_form_in_the_reused_blank_tab_is_found(self):
@@ -192,6 +195,14 @@ class FreshBrowserWorkdayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, "workday_needs_input")
         engine.assert_awaited_once()
+
+    async def test_a_tab_left_paused_is_woken_before_the_engine_starts(self):
+        # The watcher (and the candidate) leave a tab on "Resume AI"; the persisted paused state
+        # would otherwise make the run wait on it for good and never press Save and Continue.
+        _status, _engine, _gate, _update = await self.run_job(WEX_CREATE_ACCOUNT, tab_id="NEW")
+
+        self.pause_control.assert_awaited_once()
+        self.assertIs(self.pause_control.await_args.args[1], False)
 
     async def test_workday_create_account_goes_to_engine_for_human_click_checkpoint(self):
         status, engine, llm_gate, update = await self.run_job(WEX_CREATE_ACCOUNT, tab_id="NEW")

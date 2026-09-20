@@ -207,6 +207,45 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
         self.assertEqual(checked, ["dis-no"])
 
+    def test_veteran_question_never_picks_an_option_that_says_the_candidate_is_a_veteran(self):
+        # "I identify as a veteran, just not a protected veteran" contains "not" and "veteran", so
+        # the loose match picked it for a candidate whose fact is "Not a veteran".
+        variants = {
+            "protected wording": (
+                ["I identify as one or more of the classifications of protected veteran",
+                 "I am not a protected veteran", "I do not wish to self identify"],
+                "I am not a protected veteran",
+            ),
+            "plain wording": (
+                ["I am not a veteran", "I identify as a veteran, just not a protected veteran",
+                 "I identify as one or more of the classifications of protected veteran",
+                 "I do not wish to self identify"],
+                "I am not a veteran",
+            ),
+            "veteran option first": (
+                ["I identify as a veteran, just not a protected veteran", "I am not a veteran",
+                 "I do not wish to self identify"],
+                "I am not a veteran",
+            ),
+        }
+        for name, (options, expected) in variants.items():
+            radios = "".join(
+                f'<div><input type="radio" id="v{i}" name="vet"><label for="v{i}">{text}</label></div>'
+                for i, text in enumerate(options)
+            )
+            page = self.browser.new_page()
+            try:
+                page.set_content(f"<fieldset><legend><label>Veteran Status*</label></legend>{radios}</fieldset>")
+                page.evaluate(_autofill_script({**self.OWN_FACTS, "veteran_status": "Not a veteran"}))
+                chosen = page.evaluate(
+                    "() => Array.from(document.querySelectorAll('input:checked'))"
+                    ".map(i => document.querySelector('label[for=\"' + i.id + '\"]').innerText)"
+                )
+            finally:
+                page.close()
+            with self.subTest(name):
+                self.assertEqual(chosen, [expected])
+
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
             """

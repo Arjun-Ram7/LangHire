@@ -820,6 +820,9 @@ async def open_with_fapply(
             facts = load_autofill_facts(profile, RESUME_PATH)
             facts.update(job_title=title, job_company=company)
             print(f"  🤖 [F{worker_id}] Workday: deterministic fill → LLM → Save and Continue → Review")
+            # A tab left on "Resume AI" (by the watcher or the candidate) keeps that state across
+            # navigations, and the engine waits on it: wake it so this run does the work.
+            await set_ai_pause_control(browser, False)
             try:
                 workday = await run_workday_deterministic(
                     browser, facts=facts, resume_path=RESUME_PATH, worker_id=worker_id,
