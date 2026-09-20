@@ -30,6 +30,7 @@ class Harness:
         self.states = states  # target_id -> control snapshot
         self.busy = busy
         self.assisted: list[str] = []
+        self.flags: dict[str, dict] = {}
         self.assist_gate = asyncio.Event()
         self.assist_gate.set()
         self.browser = SimpleNamespace(get_tabs=AsyncMock(side_effect=lambda: self.tabs), stop=AsyncMock())
@@ -48,8 +49,9 @@ class Harness:
             results.append({**state, "target_id": target_id})
         return results
 
-    async def assist(self, _browser, target_id, _url):
+    async def assist(self, _browser, target_id, _url, cancel_flag):
         self.assisted.append(target_id)
+        self.flags[target_id] = cancel_flag
         await self.assist_gate.wait()
 
     def watcher(self):
@@ -114,6 +116,24 @@ class AssistWatcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(h.connects, 2)
 
+    async def test_closing_the_tab_being_filled_cancels_that_run_instead_of_wandering_off(self):
+        # Live: the tab closed mid-run, browser-use moved its focus to "another tab", and the AI
+        # helper carried on in the candidate's other applications.
+        h = Harness([_tab("A", "https://a.example/apply"), _tab("B", "https://b.example/apply")],
+                    {"A": {"installed": True, "paused": False, "userChanged": True}})
+        h.assist_gate.clear()
+        watcher = h.watcher()
+        await watcher.tick()
+        await asyncio.sleep(0)
+        self.assertFalse(h.flags["A"]["cancel_requested"])
+
+        h.tabs = [_tab("B", "https://b.example/apply")]
+        await watcher.tick()
+
+        self.assertTrue(h.flags["A"]["cancel_requested"])
+        h.assist_gate.set()
+        await asyncio.sleep(0.05)
+
     async def test_a_hung_browser_call_cannot_freeze_the_watcher_forever(self):
         h = Harness([_tab("A", "https://a.example/apply")], {})
         watcher = h.watcher()
@@ -139,6 +159,7 @@ class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
     """What Resume AI actually does on a tab once the run is over."""
 
     async def run_assist(self, url):
+        self.flag = {"cancel_requested": False}
         browser = SimpleNamespace(get_tabs=AsyncMock(return_value=[
             _tab("MINE", url), _tab("OTHER1", "https://other.example/a"), _tab("OTHER2", "https://wexinc.wd5.myworkdayjobs.com/b"),
         ]))
@@ -150,7 +171,7 @@ class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
             patch.object(assist_watcher, "fill_current_page", new=AsyncMock()) as one_page,
             patch.object(assist_watcher, "release_review_handoff", new=AsyncMock()) as release,
         ):
-            await assist_watcher._assist(browser, "MINE", url)
+            await assist_watcher._assist(browser, "MINE", url, self.flag)
         return focus, wizard, one_page, release
 
     async def test_on_a_workday_application_it_fills_and_moves_through_the_pages_like_a_run(self):
@@ -169,6 +190,7 @@ class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
         _focus, wizard, _one_page, _release = await self.run_assist("https://wexinc.wd5.myworkdayjobs.com/en-US/wexinc/job/x/apply")
 
         self.assertEqual(wizard.await_args.kwargs["ignored_target_ids"], {"OTHER1", "OTHER2"})
+        self.assertIs(wizard.await_args.kwargs["cancel_flag"], self.flag)
 
     async def test_on_any_other_site_it_only_fills_the_page_in_front_of_the_candidate(self):
         _focus, wizard, one_page, release = await self.run_assist("https://jobs.example.com/apply/123")

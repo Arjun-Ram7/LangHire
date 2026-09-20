@@ -73,7 +73,7 @@ async def _connect() -> BrowserSession | None:
     return browser
 
 
-async def _assist(browser: BrowserSession, target_id: str, url: str) -> None:
+async def _assist(browser: BrowserSession, target_id: str, url: str, cancel_flag: dict) -> None:
     """Resume AI on one tab, after the run that opened it is over.
 
     A Workday application gets what a run gives it: fill each page, press Save and Continue and
@@ -89,7 +89,7 @@ async def _assist(browser: BrowserSession, target_id: str, url: str) -> None:
         await run_workday_deterministic(
             browser, facts=facts, resume_path=RESUME_PATH, worker_id=0,
             passes=12, llm_cleanup=True, llm_steps=60, llm_timeout=300.0,
-            profile=profile, ignored_target_ids=others,
+            profile=profile, ignored_target_ids=others, cancel_flag=cancel_flag,
         )
     else:
         await fill_current_page(browser, facts, RESUME_PATH, profile)
@@ -103,7 +103,7 @@ class AssistWatcher:
         is_busy: Callable[[], bool],
         connect: Callable[[], Awaitable[Any]] = _connect,
         install_controls: Callable[..., Awaitable[list[dict[str, Any]]]] = set_ai_pause_controls_for_tabs,
-        assist: Callable[[Any, str, str], Awaitable[None]] = _assist,
+        assist: Callable[[Any, str, str, dict], Awaitable[None]] = _assist,
         interval: float = 1.5,
         tick_timeout: float = 60.0,
     ) -> None:
@@ -115,6 +115,7 @@ class AssistWatcher:
         self.tick_timeout = tick_timeout
         self.browser: Any = None
         self.assisting: set[str] = set()
+        self.cancel_flags: dict[str, dict] = {}
 
     async def _disconnect(self) -> None:
         browser, self.browser = self.browser, None
@@ -126,12 +127,14 @@ class AssistWatcher:
 
     async def _run_assist(self, target_id: str, url: str) -> None:
         browser = self.browser
+        flag = self.cancel_flags[target_id] = {"cancel_requested": False}
         try:
-            await self.assist(browser, target_id, url)
+            await self.assist(browser, target_id, url, flag)
         except Exception as exc:
             print(f"  ⚠️  Resume AI autofill stopped: {type(exc).__name__}: {str(exc)[:160]}")
         finally:
             self.assisting.discard(target_id)
+            self.cancel_flags.pop(target_id, None)
             try:
                 await self.install_controls(browser, [target_id], True)
             except Exception:
@@ -158,6 +161,11 @@ class AssistWatcher:
         except Exception:
             await self._disconnect()
             return
+        # A tab that closes mid-fill ends its run: browser-use would otherwise move the AI helper's
+        # focus to whichever tab is left, which is another of the candidate's applications.
+        for target_id in list(self.assisting):
+            if target_id not in urls and target_id in self.cancel_flags:
+                self.cancel_flags[target_id]["cancel_requested"] = True
         for state in results:
             target_id = str(state.get("target_id") or "")
             action = plan_tab_action(state)
