@@ -182,6 +182,31 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
         self.assertEqual(checked, [["true", False], ["false", True]])
 
+    def test_a_choice_that_did_not_stick_is_retried_instead_of_staying_locked(self):
+        # Live: the "No, I do not have a disability" click was reset by a re-render, but the
+        # choice stayed locked, was never retried, and Save and Continue kept failing with
+        # "Please check one of the boxes below".
+        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+        page = self.browser.new_page()
+        try:
+            page.set_content(self.SELF_IDENTIFY)
+            page.evaluate("""() => {
+              let clicks = 0;
+              const box = document.getElementById('dis-no');
+              box.addEventListener('click', () => { clicks += 1; if (clicks === 1) setTimeout(() => { box.checked = false; }, 0); });
+            }""")
+            page.evaluate(_autofill_script(facts))
+            page.wait_for_timeout(80)
+            self.assertFalse(page.evaluate("() => document.getElementById('dis-no').checked"))
+
+            page.evaluate(_autofill_script(facts))
+            page.wait_for_timeout(80)
+            checked = page.evaluate("() => Array.from(document.querySelectorAll('input:checked')).map(e => e.id)")
+        finally:
+            page.close()
+
+        self.assertEqual(checked, ["dis-no"])
+
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
             """

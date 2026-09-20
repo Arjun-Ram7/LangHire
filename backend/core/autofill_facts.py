@@ -519,6 +519,22 @@ def _autofill_script(facts: dict[str, str]) -> str:
   }};
   window.__STATIC_AUTOFILL_LOCKS = window.__STATIC_AUTOFILL_LOCKS || {{}};
   window.__STATIC_CHOICE_LOCKS = window.__STATIC_CHOICE_LOCKS || {{}};
+  // A choice we clicked whose control ended up unchecked (a re-render reset it) must not stay
+  // locked: it would never be retried and the page keeps failing "please check one of the boxes".
+  for (const el of Array.from(document.querySelectorAll('[data-static-lock-key]'))) {{
+    const native = el.matches('input') ? el : el.querySelector('input[type="radio"], input[type="checkbox"]');
+    const checked = native ? native.checked : el.getAttribute('aria-checked') === 'true';
+    if (checked) continue;
+    const group = el.closest('fieldset, [role="group"], [role="radiogroup"]') || el.parentElement;
+    if (group && group.querySelector('input:checked, [aria-checked="true"]')) continue;
+    delete window.__STATIC_CHOICE_LOCKS[el.dataset.staticLockKey];
+    delete el.dataset.staticLockKey;
+    delete el.dataset.staticAutofilled;
+    delete el.dataset.staticChoiceLocked;
+    if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+    if (el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
+    if (el.getAttribute('tabindex') === '-1') el.removeAttribute('tabindex');
+  }}
   if (!window.__STATIC_CHOICE_CLICK_GUARD?.installed) {{
     window.__STATIC_CHOICE_CLICK_GUARD = {{ installed: true, blocked: 0, bypass: false }};
     const lockedChoiceTarget = (target) => {{
@@ -2088,7 +2104,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     input.dataset.staticChoiceLocked = 'true';
     const labels = [...(input.labels || []), input.closest?.('label')].filter(Boolean);
     labels.forEach((label) => {{ label.dataset.staticChoiceLocked = 'true'; }});
-    if (lockKey) window.__STATIC_CHOICE_LOCKS[lockKey] = true;
+    if (lockKey) {{ window.__STATIC_CHOICE_LOCKS[lockKey] = true; input.dataset.staticLockKey = lockKey; }}
     result.choices += 1;
     // A native radio/checkbox reliably shows its own checked state, but a
     // vision model reading a long, legalese-heavy question block (veteran
@@ -2182,7 +2198,7 @@ def _autofill_script(facts: dict[str, str]) -> str:
     }}
     control.dataset.staticAutofilled = field;
     control.dataset.staticChoiceLocked = 'true';
-    if (lockKey) window.__STATIC_CHOICE_LOCKS[lockKey] = true;
+    if (lockKey) {{ window.__STATIC_CHOICE_LOCKS[lockKey] = true; control.dataset.staticLockKey = lockKey; }}
     result.choices += 1;
     // Same reasoning as setChoice()/finalizeSelection() above: block further
     // interaction so a vision model can't re-click an already-correct custom
