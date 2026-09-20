@@ -22,137 +22,140 @@ def _tab(target_id, url):
     return SimpleNamespace(target_id=target_id, url=url)
 
 
-class Harness:
-    """A fake browser with per-tab control state, driving AssistWatcher.tick()."""
+class FakePoller:
+    """Stands in for the browser: per-tab control state, driven through AssistWatcher.tick()."""
 
-    def __init__(self, tabs, states, busy=False):
-        self.tabs = tabs
-        self.states = states  # target_id -> control snapshot
-        self.busy = busy
+    def __init__(self, tabs, states):
+        self.tabs_now = dict(tabs)  # key -> url
+        self.states = states  # key -> control snapshot
         self.assisted: list[str] = []
         self.flags: dict[str, dict] = {}
         self.assist_gate = asyncio.Event()
         self.assist_gate.set()
-        self.browser = SimpleNamespace(get_tabs=AsyncMock(side_effect=lambda: self.tabs), stop=AsyncMock())
         self.connects = 0
+        self.closes = 0
+        self.fail_tabs = False
+        self.connect_gate = None
 
     async def connect(self):
         self.connects += 1
-        return self.browser
+        if self.connect_gate is not None:
+            await self.connect_gate.wait()
+        return True
 
-    async def install_controls(self, _browser, ids, paused):
-        results = []
-        for target_id in ids:
-            state = self.states.setdefault(target_id, {"installed": True, "paused": False, "userChanged": False})
-            if paused is not None:
-                state.update(paused=paused, userChanged=False)
-            results.append({**state, "target_id": target_id})
-        return results
+    async def tabs(self):
+        if self.fail_tabs:
+            raise RuntimeError("connection closed")
+        out = []
+        for key, url in self.tabs_now.items():
+            state = self.states.setdefault(key, {"installed": True, "paused": False, "userChanged": False})
+            out.append((key, url, dict(state)))
+        return out
 
-    async def assist(self, _browser, target_id, _url, cancel_flag):
-        self.assisted.append(target_id)
-        self.flags[target_id] = cancel_flag
+    async def set_paused(self, key, paused):
+        self.states.setdefault(key, {"installed": True})
+        self.states[key].update(paused=paused, userChanged=False)
+
+    async def assist(self, key, url, cancel_flag):
+        self.assisted.append(key)
+        self.flags[key] = cancel_flag
         await self.assist_gate.wait()
 
+    async def close(self):
+        self.closes += 1
+
+
+class Harness:
+    def __init__(self, tabs, states, busy=False):
+        self.poller = FakePoller(tabs, states)
+        self.busy = busy
+
     def watcher(self):
-        return AssistWatcher(
-            is_busy=lambda: self.busy,
-            connect=self.connect,
-            install_controls=self.install_controls,
-            assist=self.assist,
-        )
+        return AssistWatcher(is_busy=lambda: self.busy, poller=self.poller)
 
 
 class AssistWatcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_http_tab_gets_the_control_and_starts_paused_once_the_run_is_over(self):
-        h = Harness([_tab("A", "https://x.wd5.myworkdayjobs.com/apply"), _tab("B", "https://www.fapply.ai/p"),
-                     _tab("C", "chrome-extension://abc/page.html"), _tab("D", "about:blank")], {})
+        h = Harness({"A": "https://x.wd5.myworkdayjobs.com/apply", "B": "https://www.fapply.ai/p"}, {})
 
         await h.watcher().tick()
 
-        self.assertEqual(set(h.states), {"A", "B"})
-        self.assertTrue(all(state["paused"] for state in h.states.values()))
+        self.assertEqual(set(h.poller.states), {"A", "B"})
+        self.assertTrue(all(state["paused"] for state in h.poller.states.values()))
 
     async def test_pressing_resume_runs_autofill_on_that_tab_only_and_only_once(self):
-        h = Harness([_tab("A", "https://a.example/apply"), _tab("B", "https://b.example/apply")],
+        h = Harness({"A": "https://a.example/apply", "B": "https://b.example/apply"},
                     {"A": {"installed": True, "paused": True, "userChanged": False},
                      "B": {"installed": True, "paused": False, "userChanged": True}})
-        h.assist_gate.clear()
+        h.poller.assist_gate.clear()
         watcher = h.watcher()
 
         await watcher.tick()
         await watcher.tick()  # still running: must not start a second pass
         await asyncio.sleep(0)
-        self.assertEqual(h.assisted, ["B"])
+        self.assertEqual(h.poller.assisted, ["B"])
 
-        h.assist_gate.set()
+        h.poller.assist_gate.set()
         await asyncio.sleep(0.05)
-        self.assertTrue(h.states["B"]["paused"], "the control returns to Resume AI when autofill finishes")
+        self.assertTrue(h.poller.states["B"]["paused"], "the control returns to Resume AI when autofill finishes")
 
     async def test_nothing_is_touched_while_a_run_owns_the_browser(self):
-        h = Harness([_tab("A", "https://a.example/apply")], {}, busy=True)
+        h = Harness({"A": "https://a.example/apply"}, {}, busy=True)
 
         await h.watcher().tick()
 
-        self.assertEqual((h.connects, h.states, h.assisted), (0, {}, []))
+        self.assertEqual((h.poller.connects, h.poller.states, h.poller.assisted), (0, {}, []))
 
     async def test_no_browser_means_nothing_to_do(self):
-        h = Harness([], {})
-        watcher = h.watcher()
-        watcher.connect = AsyncMock(return_value=None)
+        h = Harness({}, {})
+        h.poller.connect = AsyncMock(return_value=False)
 
-        await watcher.tick()
+        await h.watcher().tick()
 
-        self.assertEqual(h.assisted, [])
+        self.assertEqual(h.poller.assisted, [])
 
     async def test_a_dropped_browser_connection_is_re_established_next_tick(self):
-        h = Harness([_tab("A", "https://a.example/apply")], {})
+        h = Harness({"A": "https://a.example/apply"}, {})
         watcher = h.watcher()
         await watcher.tick()
-        h.browser.get_tabs.side_effect = RuntimeError("connection closed")
+        h.poller.fail_tabs = True
         await watcher.tick()
-        h.browser.get_tabs.side_effect = lambda: h.tabs
+        h.poller.fail_tabs = False
         await watcher.tick()
 
-        self.assertEqual(h.connects, 2)
+        self.assertEqual(h.poller.connects, 2)
 
     async def test_closing_the_tab_being_filled_cancels_that_run_instead_of_wandering_off(self):
         # Live: the tab closed mid-run, browser-use moved its focus to "another tab", and the AI
         # helper carried on in the candidate's other applications.
-        h = Harness([_tab("A", "https://a.example/apply"), _tab("B", "https://b.example/apply")],
+        h = Harness({"A": "https://a.example/apply", "B": "https://b.example/apply"},
                     {"A": {"installed": True, "paused": False, "userChanged": True}})
-        h.assist_gate.clear()
+        h.poller.assist_gate.clear()
         watcher = h.watcher()
         await watcher.tick()
         await asyncio.sleep(0)
-        self.assertFalse(h.flags["A"]["cancel_requested"])
+        self.assertFalse(h.poller.flags["A"]["cancel_requested"])
 
-        h.tabs = [_tab("B", "https://b.example/apply")]
+        del h.poller.tabs_now["A"]
         await watcher.tick()
 
-        self.assertTrue(h.flags["A"]["cancel_requested"])
-        h.assist_gate.set()
+        self.assertTrue(h.poller.flags["A"]["cancel_requested"])
+        h.poller.assist_gate.set()
         await asyncio.sleep(0.05)
 
     async def test_a_hung_browser_call_cannot_freeze_the_watcher_forever(self):
-        h = Harness([_tab("A", "https://a.example/apply")], {})
+        h = Harness({"A": "https://a.example/apply"}, {})
         watcher = h.watcher()
         watcher.interval = 0.01
         watcher.tick_timeout = 0.05
-        hang = asyncio.Event()
-
-        async def hanging_connect():
-            h.connects += 1
-            await hang.wait()
-
-        watcher.connect = hanging_connect
+        h.poller.connect_gate = asyncio.Event()  # never set: connect hangs
         task = asyncio.create_task(watcher.run_forever())
         await asyncio.sleep(0.4)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
 
-        self.assertGreater(h.connects, 1)
+        self.assertGreater(h.poller.connects, 1)
 
 
 class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
