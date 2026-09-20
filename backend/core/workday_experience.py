@@ -235,7 +235,8 @@ _STATE_JS = r"""(() => {
         startMonth: date(row, 'startDate', 'Month'), startYear: date(row, 'startDate', 'Year'),
         endMonth: date(row, 'endDate', 'Month'), endYear: date(row, 'endDate', 'Year'),
         description: val(row, 'textarea'),
-        school: val(row, 'input[name="schoolName"]'),
+        school: val(row, 'input[name="schoolName"]') || clean(row.querySelector('[data-automation-id="formField-school"] [data-automation-id="promptAriaInstruction"]')?.innerText).replace(/^\d+\s+items?\s+selected,?\s*/i, ''),
+        schoolSearch: !!row.querySelector('[data-automation-id="formField-school"] [data-automation-id="multiSelectContainer"]'),
         degree: /^select/i.test(degree) ? '' : degree,
         fieldSelected: selected ? Number(selected[1]) : 0,
         gpa: val(row, 'input[name="gradeAverage"]'),
@@ -473,12 +474,33 @@ async def _pick_option(browser, wanted: list[str], rank) -> bool:
     return await _click_option(browser, best["index"])
 
 
+# A school's short name and the official one a search list carries.
+_SCHOOL_ALIASES = {"virginia tech": ("virginia polytechnic institute",)}
+
+
+def school_option_rank(school: str, option: str) -> int:
+    """Rank a search-list entry for the candidate's school; 0 is never chosen."""
+    wanted, text = _norm(school), _norm(option)
+    if not wanted or not text:
+        return 0
+    if text == wanted:
+        return 3
+    if any(text.startswith(alias) for alias in _SCHOOL_ALIASES.get(wanted, ())):
+        return 2
+    # "West Virginia University" or "Virginia Union University" merely contain a shared word.
+    return 1 if text.startswith(wanted) else 0
+
+
+def _school_ok(school: str, current: str) -> bool:
+    return school_option_rank(school, current) > 0 or _norm(school) == _norm(current)
+
+
 def education_field_updates(plan: dict[str, str], row: dict[str, Any]) -> list[str]:
     """Fields of the Education row to (re)type, in fill order. Blank fields are filled and a
     value that differs from the candidate's facts is corrected: an earlier run's answer is saved
     in Workday's draft, so leaving non-blank values alone kept a wrong degree or year forever."""
     updates = []
-    if plan["school"] and _norm(row["school"]) != _norm(plan["school"]):
+    if plan["school"] and not _school_ok(plan["school"], row["school"]):
         updates.append("school")
     # Any "Bachelor of Science ..." option is right for a B.S.; only a lesser match is corrected.
     if plan["degree"] and degree_option_rank(plan["degree"], row["degree"]) < 20:
@@ -490,6 +512,24 @@ def education_field_updates(plan: dict[str, str], row: dict[str, Any]) -> list[s
     if plan["last_year"] and row["lastYear"] != plan["last_year"]:
         updates.append("last_year")
     return updates
+
+
+async def _pick_school_from_search(browser, row_id: str, school: str) -> str | None:
+    """Type into a search-list School field and click the entry for the school."""
+    element = _field(row_id, "school", "input")
+    aliases = [school, *(alias for alias in _SCHOOL_ALIASES.get(_norm(school), ()))]
+    for query in aliases:
+        if not await _type(browser, element, query):
+            return None
+        await _press(browser, "Enter")  # the search box only filters on Enter
+        await asyncio.sleep(1.5)
+        options = await _visible_options(browser, element)
+        best = max(options, key=lambda option: school_option_rank(school, option["text"]), default=None)
+        if best is not None and school_option_rank(school, best["text"]) > 0 and await _click_option(browser, best["index"], element):
+            await asyncio.sleep(0.5)
+            return best["text"]
+        await _press(browser, "Escape")
+    return None
 
 
 async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> dict[str, Any]:
@@ -511,12 +551,17 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
     updates = education_field_updates(plan, row)
 
     if "school" in updates:
-        await _type(browser, _field(row_id, "schoolName", "input"), plan["school"])
-        await asyncio.sleep(0.8)
-        # Some tenants turn the school box into a search list; take the best match if one opened.
-        wanted = _norm(plan["school"])
-        await _pick_option(browser, [plan["school"]], lambda text: 2 if _norm(text) == wanted else int(wanted in _norm(text)))
-        filled.append("school")
+        if row.get("schoolSearch"):
+            picked = await _pick_school_from_search(browser, row_id, plan["school"])
+            if picked:
+                filled.append("school")
+        else:
+            await _type(browser, _field(row_id, "schoolName", "input"), plan["school"])
+            await asyncio.sleep(0.8)
+            # Some tenants offer suggestions as you type; take the best match if a list opened.
+            wanted = _norm(plan["school"])
+            await _pick_option(browser, [plan["school"]], lambda text: 2 if _norm(text) == wanted else int(wanted in _norm(text)))
+            filled.append("school")
     if "degree" in updates:
         if await _click(browser, _field(row_id, "degree", "button")):
             await asyncio.sleep(0.6)

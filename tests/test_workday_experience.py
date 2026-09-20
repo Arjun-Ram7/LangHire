@@ -8,6 +8,7 @@ from backend.core.workday_experience import (
     hear_pick,
     options_expr,
     is_hear_question,
+    school_option_rank,
     education_field_updates,
     education_plan,
     parse_experience_text,
@@ -367,3 +368,23 @@ def test_options_belong_to_the_popup_nearest_the_clicked_control_not_to_another_
 
     assert near == ["Career Websites", "Social Media"]
     assert set(anywhere) == {"Career Websites", "Social Media", "Massachusetts", "Michigan"}
+
+
+def test_a_school_picked_from_a_search_list_counts_even_when_its_official_name_differs():
+    # Some tenants list "Virginia Polytechnic Institute and State University", not "Virginia Tech".
+    row = _edu_row(school="Virginia Polytechnic Institute and State University")
+
+    assert "school" not in education_field_updates(PLAN, row)
+    assert "school" in education_field_updates(PLAN, _edu_row(school="Virginia Union University"))
+    assert "school" in education_field_updates(PLAN, _edu_row(school=""))
+
+
+def test_school_options_prefer_the_exact_name_then_the_official_one_and_never_a_lookalike():
+    options = ["Virginia Union University", "Virginia Polytechnic Institute and State University",
+               "Virginia Tech", "West Virginia University"]
+
+    ranked = sorted(options, key=lambda o: school_option_rank("Virginia Tech", o), reverse=True)
+
+    assert ranked[:2] == ["Virginia Tech", "Virginia Polytechnic Institute and State University"]
+    assert school_option_rank("Virginia Tech", "Virginia Union University") == 0
+    assert school_option_rank("Virginia Tech", "West Virginia University") == 0

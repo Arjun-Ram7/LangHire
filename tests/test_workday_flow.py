@@ -14,6 +14,7 @@ from backend.core.workday_flow import (
     run_workday_deterministic,
     _fill_deterministic_widgets,
     _fill_experience_step,
+    _llm_unavailable_reason,
     _static_fill_passes,
     fill_current_page,
 )
@@ -585,3 +586,42 @@ class SaveOpenQuestionsTests(unittest.TestCase):
         summary = {"open_questions": [{"question": "Why this company?", "type": "textarea"}]}
 
         self.assertEqual(save_open_questions(summary, "https://x.com", store=None), 0)
+
+
+class LlmAvailabilityTests(unittest.IsolatedAsyncioTestCase):
+    """The cleanup AI should not be started (and waited on for minutes) when its provider refuses us."""
+
+    @staticmethod
+    def llm(error=None):
+        class Provider402(Exception):
+            status_code = 402
+
+        model = type("Llm", (), {})()
+        async def ainvoke(_messages, **_kwargs):
+            if error == "402":
+                raise Provider402("Error code: 402 - This request requires more credits")
+            if error == "timeout":
+                raise asyncio.TimeoutError()
+            if error == "500":
+                raise RuntimeError("Error code: 500 - upstream")
+            return object()
+        model.ainvoke = ainvoke
+        return model
+
+    async def test_a_working_llm_is_available(self):
+        self.assertIsNone(await _llm_unavailable_reason(self.llm(), self.llm()))
+
+    async def test_out_of_credits_on_both_models_is_reported_so_cleanup_is_skipped(self):
+        reason = await _llm_unavailable_reason(self.llm("402"), self.llm("402"))
+
+        self.assertIn("credits", reason)
+
+    async def test_out_of_credits_on_the_first_model_alone_is_not_enough_to_skip(self):
+        self.assertIsNone(await _llm_unavailable_reason(self.llm("402"), self.llm()))
+
+    async def test_a_slow_or_flaky_call_is_left_to_the_agents_own_retries(self):
+        self.assertIsNone(await _llm_unavailable_reason(self.llm("timeout"), None))
+        self.assertIsNone(await _llm_unavailable_reason(self.llm("500"), None))
+
+    async def test_no_fallback_and_a_refusal_is_reported(self):
+        self.assertIn("credits", await _llm_unavailable_reason(self.llm("402"), None))

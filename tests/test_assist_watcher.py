@@ -143,6 +143,23 @@ class AssistWatcherTests(unittest.IsolatedAsyncioTestCase):
         h.poller.assist_gate.set()
         await asyncio.sleep(0.05)
 
+    async def test_a_tab_being_filled_is_never_paused_by_the_watcher(self):
+        # Live: the engine re-arms the control as "AI is working" (unpaused, untouched). The
+        # watcher read that as "no run owns this tab", paused it, and froze the fill it had
+        # just been asked to do, so Save and Continue was never pressed.
+        h = Harness({"A": "https://a.example/apply"}, {"A": {"installed": True, "paused": False, "userChanged": True}})
+        h.poller.assist_gate.clear()
+        watcher = h.watcher()
+        await watcher.tick()
+        await asyncio.sleep(0)
+        h.poller.states["A"].update(paused=False, userChanged=False)  # what the engine does
+
+        await watcher.tick()
+
+        self.assertFalse(h.poller.states["A"]["paused"])
+        h.poller.assist_gate.set()
+        await asyncio.sleep(0.05)
+
     async def test_a_hung_browser_call_cannot_freeze_the_watcher_forever(self):
         h = Harness({"A": "https://a.example/apply"}, {})
         watcher = h.watcher()

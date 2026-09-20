@@ -247,6 +247,8 @@ class AssistWatcher:
             if key not in open_keys and key in self.cancel_flags:
                 self.cancel_flags[key]["cancel_requested"] = True
         for key, url, state in tabs:
+            if key in self.assisting:
+                continue  # its fill owns the control now; the engine re-arms it as "AI is working"
             action = plan_tab_action(state)
             if action == "idle":
                 await self.poller.set_paused(key, True)

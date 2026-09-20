@@ -890,6 +890,42 @@ def _cleanup_succeeded(agent_reported_success: bool, last_review: dict | None) -
     return not (review.get("needsLlm") or [])
 
 
+def _is_refusal(exc: BaseException) -> bool:
+    """A provider refusing us outright (payment, auth), as opposed to a slow or flaky call."""
+    text = str(exc).lower()
+    return (
+        getattr(exc, "status_code", None) in (401, 402, 403)
+        or "more credits" in text
+        or "payment required" in text
+        or "insufficient" in text
+    )
+
+
+async def _refusal_from(model, timeout: float) -> str | None:
+    from browser_use.llm.messages import UserMessage
+
+    try:
+        await asyncio.wait_for(model.ainvoke([UserMessage(content="Reply with OK.")]), timeout)
+    except Exception as exc:
+        return str(exc)[:140] if _is_refusal(exc) else None
+    return None
+
+
+async def _llm_unavailable_reason(llm, fallback=None, timeout: float = 10.0) -> str | None:
+    """Why the cleanup AI cannot run, or None. Only a definite refusal from every model counts.
+
+    With the credits gone every step failed for minutes (each on its own timeout) before the agent
+    gave up, holding the tab, while nothing it could do needed that AI: the fill and Save and
+    Continue are code. A slow or flaky provider is still left to the agent's own retries.
+    """
+    reason = await _refusal_from(llm, timeout)
+    if reason is None:
+        return None
+    if fallback is not None and await _refusal_from(fallback, timeout) is None:
+        return None
+    return reason
+
+
 async def _run_llm_cleanup(
     browser: BrowserSession,
     *,
@@ -1171,6 +1207,11 @@ async def _run_llm_cleanup(
                 fallback_llm = create_fallback_llm(load_llm_settings())
             except Exception as exc:
                 print(f"  ⚠️  [W{worker_id}] Could not build fallback LLM: {type(exc).__name__}: {exc}")
+        unavailable = await _llm_unavailable_reason(llm, fallback_llm)
+        if unavailable:
+            print(f"  ⏭️  [W{worker_id}] AI cleanup skipped, the provider refused: {unavailable[:80]}")
+            state.update(attempted=False, stop_reason=f"AI unavailable: {unavailable}")
+            return state
         agent = Agent(
             task=task,
             llm=llm,
