@@ -224,7 +224,9 @@ _STATE_JS = r"""(() => {
     const section = heading.parentElement;
     const rows = Array.from(section.querySelectorAll(`[data-fkit-id^="${prefix}-"][data-fkit-id$="--null"]`)).map(row => {
       const selected = clean(row.querySelector('[data-automation-id="promptAriaInstruction"]')?.innerText).match(/(\d+)\s+items?\s+selected/i);
-      const degree = clean(row.querySelector('[data-automation-id="formField-degree"] button')?.innerText);
+      const degreeField = row.querySelector('[data-automation-id="formField-degree"]');
+      const degree = clean(degreeField?.querySelector('button')?.innerText)
+        || clean(degreeField?.querySelector('[data-automation-id="promptAriaInstruction"]')?.innerText).replace(/^\d+\s+items?\s+selected,?\s*/i, '');
       return {
         id: row.getAttribute('data-fkit-id'),
         job: row.getAttribute('data-langhire-job') || '',
@@ -238,6 +240,7 @@ _STATE_JS = r"""(() => {
         school: val(row, 'input[name="schoolName"]') || clean(row.querySelector('[data-automation-id="formField-school"] [data-automation-id="promptAriaInstruction"]')?.innerText).replace(/^\d+\s+items?\s+selected,?\s*/i, ''),
         schoolSearch: !!row.querySelector('[data-automation-id="formField-school"] [data-automation-id="multiSelectContainer"]'),
         degree: /^select/i.test(degree) ? '' : degree,
+        degreeSearch: !!degreeField?.querySelector('[data-automation-id="multiSelectContainer"]'),
         fieldSelected: selected ? Number(selected[1]) : 0,
         gpa: val(row, 'input[name="gradeAverage"]'),
         firstYear: date(row, 'firstYearAttended', 'Year'), lastYear: date(row, 'lastYearAttended', 'Year'),
@@ -514,18 +517,16 @@ def education_field_updates(plan: dict[str, str], row: dict[str, Any]) -> list[s
     return updates
 
 
-async def _pick_school_from_search(browser, row_id: str, school: str) -> str | None:
-    """Type into a search-list School field and click the entry for the school."""
-    element = _field(row_id, "school", "input")
-    aliases = [school, *(alias for alias in _SCHOOL_ALIASES.get(_norm(school), ()))]
-    for query in aliases:
+async def _pick_from_search(browser, element: str, queries: list[str], rank: Callable[[str], int]) -> str | None:
+    """Type into a search-list field, press Enter to filter, and click the best-ranked entry."""
+    for query in queries:
         if not await _type(browser, element, query):
             return None
         await _press(browser, "Enter")  # the search box only filters on Enter
         await asyncio.sleep(1.5)
         options = await _visible_options(browser, element)
-        best = max(options, key=lambda option: school_option_rank(school, option["text"]), default=None)
-        if best is not None and school_option_rank(school, best["text"]) > 0 and await _click_option(browser, best["index"], element):
+        best = max(options, key=lambda option: rank(option["text"]), default=None)
+        if best is not None and rank(best["text"]) > 0 and await _click_option(browser, best["index"], element):
             await asyncio.sleep(0.5)
             return best["text"]
         await _press(browser, "Escape")
@@ -552,7 +553,10 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
 
     if "school" in updates:
         if row.get("schoolSearch"):
-            picked = await _pick_school_from_search(browser, row_id, plan["school"])
+            aliases = [plan["school"], *_SCHOOL_ALIASES.get(_norm(plan["school"]), ())]
+            picked = await _pick_from_search(
+                browser, _field(row_id, "school", "input"), aliases, lambda text: school_option_rank(plan["school"], text)
+            )
             if picked:
                 filled.append("school")
         else:
@@ -563,9 +567,13 @@ async def fill_education(browser, plan: dict[str, str], worker_id: int = 0) -> d
             await _pick_option(browser, [plan["school"]], lambda text: 2 if _norm(text) == wanted else int(wanted in _norm(text)))
             filled.append("school")
     if "degree" in updates:
-        if await _click(browser, _field(row_id, "degree", "button")):
+        rank = lambda text: degree_option_rank(plan["degree"], text)
+        if row.get("degreeSearch"):
+            if await _pick_from_search(browser, _field(row_id, "degree", "input"), ["Bachelor of Science", "Bachelor"], rank):
+                filled.append("degree")
+        elif await _click(browser, _field(row_id, "degree", "button")):
             await asyncio.sleep(0.6)
-            if await _pick_option(browser, [plan["degree"]], lambda text: degree_option_rank(plan["degree"], text)):
+            if await _pick_option(browser, [plan["degree"]], rank):
                 filled.append("degree")
             else:
                 await _press(browser, "Escape")
@@ -766,6 +774,9 @@ def dropdown_choice(question: str, facts: dict[str, Any]) -> Callable[[str], int
     text = _norm(question)
     if is_hear_question(question):
         return None  # picked with hear_pick, which needs the whole list at once
+    if any(phrase in text for phrase in ("level of education", "education level", "highest degree", "degree")):
+        degree = str(facts.get("degree") or "")
+        return (lambda option: degree_option_rank(degree, option)) if degree else None
     if "veteran" in text and "have you" not in text:
         fact = str(facts.get("veteran_status") or "")
         return (lambda option: veteran_option_rank(fact, option)) if fact else None

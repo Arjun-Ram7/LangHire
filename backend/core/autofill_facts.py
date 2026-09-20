@@ -1737,11 +1737,22 @@ def _autofill_script(facts: dict[str, str]) -> str:
       if (has(text, ['select', 'choose', 'please select'])) return false;
       return true;
     }});
+    if (field === 'degree' && has(norm(value), ['bachelor'])) {{
+      // A bachelor's candidate gets a bachelor's option (Science before Arts when the degree is a
+      // science one), never the first loose match, which could be an associate's degree.
+      const bachelor = options.filter((o) => has(norm(o.textContent), ['bachelor', 'undergraduate']) && !has(norm(o.textContent), ['associate']));
+      const science = has(norm(value), ['science'])
+        ? bachelor.find((o) => /\\bscience\\b|\\bb\\.?\\s?s\\b|\\bbs\\b/.test(norm(o.textContent)) || norm(o.textContent) === 'bs')
+        : null;
+      const pick = science || bachelor[0];
+      if (pick) return pick.value;
+    }}
     let exact = options.find((o) => targets.some((target) => norm(o.textContent) === target || norm(o.value) === target));
     if (exact) return exact.value;
     let loose = options.find((o) => {{
       const text = norm(o.textContent);
       const optionValue = norm(o.value);
+      if (field === 'degree' && has(norm(value), ['bachelor']) && has(text, ['associate'])) return false;
       return targets.some((target) => text && (text.includes(target) || target.includes(text) || optionValue.includes(target) || target.includes(optionValue)));
     }});
     return loose ? loose.value : null;

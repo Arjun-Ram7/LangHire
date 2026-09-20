@@ -388,3 +388,15 @@ def test_school_options_prefer_the_exact_name_then_the_official_one_and_never_a_
     assert ranked[:2] == ["Virginia Tech", "Virginia Polytechnic Institute and State University"]
     assert school_option_rank("Virginia Tech", "Virginia Union University") == 0
     assert school_option_rank("Virginia Tech", "West Virginia University") == 0
+
+
+def test_education_level_questions_get_a_bachelors_never_an_associates():
+    facts = {**FACTS, "degree": "Bachelor of Science in Computer Science"}
+    options = ["Select One", "High School", "Associate's Degree", "Associates of Science (A.S)",
+               "Bachelor's Degree", "Bachelor of Science (B.S)", "Master's Degree"]
+
+    for question in ("What is your highest level of education?", "Education Level", "Degree", "What degree are you pursuing?"):
+        choose = dropdown_choice(question, facts)
+        assert choose is not None, question
+        assert max(options, key=choose) == "Bachelor of Science (B.S)", question
+        assert choose("Associate's Degree") == 0 and choose("Associates of Science (A.S)") == 0

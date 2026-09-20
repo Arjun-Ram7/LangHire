@@ -246,6 +246,40 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(chosen, [expected])
 
+    def test_degree_select_prefers_bachelor_of_science_and_never_an_associates_degree(self):
+        lists = {
+            "arts before science": (
+                ["Select One", "High School", "GED", "Associates of Arts (A.A)", "Associates of Science (A.S)",
+                 "Bachelor of Arts (B.A)", "Bachelor of Science (B.S)", "Master of Science (M.S)"],
+                "Bachelor of Science (B.S)",
+            ),
+            "plain": (
+                ["Select One", "High School", "Associate's Degree", "Bachelor's Degree", "Master's Degree"],
+                "Bachelor's Degree",
+            ),
+            "abbreviated": (
+                ["Select One", "AA", "AS", "BA", "BS", "MS"], "BS",
+            ),
+            "associate looks similar": (
+                ["Select One", "Associate of Science", "Bachelor of Science", "Master of Science"],
+                "Bachelor of Science",
+            ),
+        }
+        facts = {**self.OWN_FACTS, "degree": "Bachelor of Science in Computer Science"}
+        for name, (options, expected) in lists.items():
+            page = self.browser.new_page()
+            try:
+                page.set_content(
+                    '<label for="deg">Degree*</label><select id="deg" required>'
+                    + "".join(f"<option>{o}</option>" for o in options) + "</select>"
+                )
+                page.evaluate(_autofill_script(facts))
+                chosen = page.evaluate("() => document.getElementById('deg').selectedOptions[0].text")
+            finally:
+                page.close()
+            with self.subTest(name):
+                self.assertEqual(chosen, expected)
+
     def test_common_workday_identity_residency_and_dates(self):
         result, values = self.run_fixture(
             """
