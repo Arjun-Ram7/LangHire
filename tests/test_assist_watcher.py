@@ -1,8 +1,9 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+from backend.core import assist_watcher
 from backend.core.assist_watcher import AssistWatcher, plan_tab_action
 
 
@@ -132,3 +133,46 @@ class AssistWatcherTests(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertGreater(h.connects, 1)
+
+
+class DefaultAssistTests(unittest.IsolatedAsyncioTestCase):
+    """What Resume AI actually does on a tab once the run is over."""
+
+    async def run_assist(self, url):
+        browser = SimpleNamespace(get_tabs=AsyncMock(return_value=[
+            _tab("MINE", url), _tab("OTHER1", "https://other.example/a"), _tab("OTHER2", "https://wexinc.wd5.myworkdayjobs.com/b"),
+        ]))
+        with (
+            patch.object(assist_watcher, "_focus_pause_target", new=AsyncMock()) as focus,
+            patch.object(assist_watcher, "load_profile", return_value={"p": 1}),
+            patch.object(assist_watcher, "load_autofill_facts", return_value={"f": 1}),
+            patch.object(assist_watcher, "run_workday_deterministic", new=AsyncMock(return_value={})) as wizard,
+            patch.object(assist_watcher, "fill_current_page", new=AsyncMock()) as one_page,
+            patch.object(assist_watcher, "release_review_handoff", new=AsyncMock()) as release,
+        ):
+            await assist_watcher._assist(browser, "MINE", url)
+        return focus, wizard, one_page, release
+
+    async def test_on_a_workday_application_it_fills_and_moves_through_the_pages_like_a_run(self):
+        # It filled one page and stopped, so the candidate had to press Next on every page.
+        focus, wizard, one_page, release = await self.run_assist("https://wexinc.wd5.myworkdayjobs.com/en-US/wexinc/job/x/apply")
+
+        wizard.assert_awaited_once()
+        kwargs = wizard.await_args.kwargs
+        self.assertEqual((kwargs["passes"], kwargs["llm_cleanup"]), (12, True))
+        self.assertEqual(kwargs["profile"], {"p": 1})
+        one_page.assert_not_awaited()
+        focus.assert_awaited_once()
+        release.assert_awaited_once()
+
+    async def test_the_ai_helper_is_kept_to_the_tab_the_candidate_pressed_resume_on(self):
+        _focus, wizard, _one_page, _release = await self.run_assist("https://wexinc.wd5.myworkdayjobs.com/en-US/wexinc/job/x/apply")
+
+        self.assertEqual(wizard.await_args.kwargs["ignored_target_ids"], {"OTHER1", "OTHER2"})
+
+    async def test_on_any_other_site_it_only_fills_the_page_in_front_of_the_candidate(self):
+        _focus, wizard, one_page, release = await self.run_assist("https://jobs.example.com/apply/123")
+
+        one_page.assert_awaited_once()
+        wizard.assert_not_awaited()
+        release.assert_awaited_once()

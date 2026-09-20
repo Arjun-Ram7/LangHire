@@ -22,7 +22,7 @@ try:
     )
     from core.config import load_profile
     from core.shared_config import RESUME_PATH
-    from core.workday_flow import fill_current_page
+    from core.workday_flow import fill_current_page, is_workday_url, run_workday_deterministic
 except ImportError:
     from backend.core.autofill_facts import (
         _automation_browser_pid,
@@ -33,7 +33,7 @@ except ImportError:
     )
     from backend.core.config import load_profile
     from backend.core.shared_config import RESUME_PATH
-    from backend.core.workday_flow import fill_current_page
+    from backend.core.workday_flow import fill_current_page, is_workday_url, run_workday_deterministic
 
 
 def plan_tab_action(state: dict[str, Any] | None) -> str:
@@ -74,11 +74,25 @@ async def _connect() -> BrowserSession | None:
 
 
 async def _assist(browser: BrowserSession, target_id: str, url: str) -> None:
-    """Fill the tab where Resume AI was pressed. It fills; the candidate keeps control of navigation."""
+    """Resume AI on one tab, after the run that opened it is over.
+
+    A Workday application gets what a run gives it: fill each page, press Save and Continue and
+    carry on until Review (the final Submit stays guarded). Any other site only has the page in
+    front of the candidate filled, since there is no wizard to walk.
+    """
     await _focus_pause_target(browser, target_id)
     profile = load_profile()
     facts = load_autofill_facts(profile, RESUME_PATH)
-    await fill_current_page(browser, facts, RESUME_PATH, profile)
+    if is_workday_url(url):
+        # Keep the AI helper on this application; the candidate's other tabs are not its business.
+        others = {str(tab.target_id) for tab in await browser.get_tabs() if str(tab.target_id) != target_id}
+        await run_workday_deterministic(
+            browser, facts=facts, resume_path=RESUME_PATH, worker_id=0,
+            passes=12, llm_cleanup=True, llm_steps=60, llm_timeout=300.0,
+            profile=profile, ignored_target_ids=others,
+        )
+    else:
+        await fill_current_page(browser, facts, RESUME_PATH, profile)
     await release_review_handoff(browser)
 
 
