@@ -176,6 +176,22 @@ export async function updateJobStatus(url: string, status: string) {
   });
 }
 
+export async function updateJobsStatus(urls: string[], status: string) {
+  try {
+    return await request<{ success: boolean; updated: number; missing: string[] }>("/jobs/status/bulk", {
+      method: "PUT",
+      body: JSON.stringify({ urls, status }),
+    });
+  } catch (e) {
+    // A backend older than the bulk endpoint answers 404: fall back to one request per job.
+    if (!(e instanceof Error) || !e.message.startsWith("API Error 404")) throw e;
+    for (let i = 0; i < urls.length; i += 10) {
+      await Promise.all(urls.slice(i, i + 10).map((url) => updateJobStatus(url, status)));
+    }
+    return { success: true, updated: urls.length, missing: [] as string[] };
+  }
+}
+
 export async function addJob(url: string, title?: string, company?: string, source?: string) {
   return request<{ success: boolean }>("/jobs/add", {
     method: "POST",

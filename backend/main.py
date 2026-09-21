@@ -1349,9 +1349,25 @@ async def update_job_status(body: dict):
     if url not in jobs:
         return _api_error("not_found", "Job not found", 404)
 
-    from core.shared_config import update_job
-    update_job(url, status=new_status, error=None)
+    from core.shared_config import mark_jobs_status
+    mark_jobs_status([url], new_status)
     return {"success": True, "url": url, "status": new_status}
+
+
+@app.put("/jobs/status/bulk")
+async def update_jobs_status_bulk(body: dict):
+    """Set one status on many jobs at once (e.g. mark 130 jobs applied in a single request)."""
+    urls = [u.strip() for u in (body.get("urls") or []) if isinstance(u, str) and u.strip()]
+    new_status = str(body.get("status", "")).strip()
+    if not urls:
+        return _api_error("missing_field", "At least one job URL is required", 400)
+
+    from core.shared_config import mark_jobs_status
+    try:
+        result = mark_jobs_status(urls, new_status)
+    except ValueError as exc:
+        return _api_error("invalid_status", str(exc), 400)
+    return {"success": True, "status": new_status, **result}
 
 
 @app.post("/jobs/add")

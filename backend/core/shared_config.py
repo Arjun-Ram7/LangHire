@@ -8,6 +8,8 @@ import sys
 import threading
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from filelock import FileLock
 from browser_use.llm import ChatAWSBedrock
 
@@ -321,6 +323,36 @@ def update_jobs_bulk(updates: dict[str, dict]) -> int:
         if changed:
             save_json(JOBS_FILE, jobs)
         return changed
+
+
+BULK_STATUSES = ("pending", "applied", "failed", "blocked")
+
+
+def mark_jobs_status(urls: list[str], status: str, *, now: str | None = None) -> dict:
+    """Set one status on many jobs in a single locked write.
+
+    Marking 130 jobs applied one request at a time re-read and rewrote the whole jobs file 130
+    times. "applied" stamps the date the History tab sorts on, keeping an earlier one if the job
+    already had it; worker-owned states (in_progress, manual_review) cannot be set this way.
+    """
+    if status not in BULK_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(BULK_STATUSES)}")
+    stamp = now or datetime.now(timezone.utc).isoformat()
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        missing = [url for url in urls if url not in jobs]
+        updated = 0
+        for url in urls:
+            job = jobs.get(url)
+            if job is None:
+                continue
+            job.update(status=status, error=None)
+            if status == "applied" and not job.get("applied_at"):
+                job["applied_at"] = stamp
+            updated += 1
+        if updated:
+            save_json(JOBS_FILE, jobs)
+    return {"updated": updated, "missing": missing}
 
 
 _claim_lock = threading.Lock()

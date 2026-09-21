@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
@@ -33,12 +33,14 @@ import {
   saveProfile,
   getProfile,
   updateJobStatus,
+  updateJobsStatus,
   deleteJobs,
   tailorResumes,
   refineTailoredResume,
   getTailoredResumeContent,
 } from "../../lib/api";
 import { markStart, measureAndTrack } from "../../lib/perf";
+import { urlsBetween } from "../../lib/selection";
 import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
 import { useTranslation } from "react-i18next";
@@ -117,6 +119,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // Multi-select state
   const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set());
+  const [markingApplied, setMarkingApplied] = useState(false);
+  // Where a shift-click range starts: the checkbox clicked last.
+  const lastClickedRef = useRef<string | null>(null);
 
   // Status dropdown state
   const [statusMenuJob, setStatusMenuJob] = useState<string | null>(null);
@@ -345,6 +350,42 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       setSelectedJobs(new Set());
     } else {
       setSelectedJobs(new Set(selectableJobs.map((j) => j.url)));
+    }
+  };
+
+  // A plain click toggles one job; shift-click selects every job from the last one clicked to
+  // this one, so a long list is two clicks rather than one per job.
+  const handleSelectClick = (e: React.MouseEvent<HTMLInputElement>, url: string) => {
+    const anchor = lastClickedRef.current;
+    lastClickedRef.current = url;
+    if (e.shiftKey && anchor && anchor !== url) {
+      const range = urlsBetween(selectableJobs.map((j) => j.url), anchor, url);
+      setSelectedJobs((prev) => new Set([...prev, ...range]));
+      return;
+    }
+    toggleSelectJob(url);
+  };
+
+  // Mark the selected jobs applied (done by hand, outside LangHire) in one request
+  const handleBatchMarkApplied = async () => {
+    if (selectedJobs.size === 0) return;
+    if (
+      !confirm(
+        `Mark ${selectedJobs.size} selected job(s) as applied? They move to History and are skipped by future runs.`
+      )
+    )
+      return;
+    setMarkingApplied(true);
+    try {
+      await updateJobsStatus([...selectedJobs], "applied");
+      setSelectedJobs(new Set());
+      lastClickedRef.current = null;
+      fetchJobs(true);
+      onJobsChanged();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to mark jobs as applied");
+    } finally {
+      setMarkingApplied(false);
     }
   };
 
@@ -686,7 +727,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                         <input
                           type="checkbox"
                           checked={selectedJobs.has(job.url)}
-                          onChange={() => toggleSelectJob(job.url)}
+                          onClick={(e) => handleSelectClick(e, job.url)}
+                          onChange={() => undefined}
+                          title="Shift-click to select a range"
                           className="mt-1 w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer flex-shrink-0"
                         />
                       )}
@@ -955,6 +998,18 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           <span className="text-sm font-medium text-foreground">
             {selectedJobs.size} selected
           </span>
+          <button
+            onClick={handleBatchMarkApplied}
+            disabled={markingApplied}
+            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold bg-success text-white hover:bg-success/90 disabled:opacity-40 transition-all"
+          >
+            {markingApplied ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <CheckCircle className="w-4 h-4" />
+            )}
+            Mark {selectedJobs.size} applied
+          </button>
           <button
             onClick={handleBatchApply}
             disabled={batchApplying}

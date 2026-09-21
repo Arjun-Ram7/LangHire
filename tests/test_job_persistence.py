@@ -63,3 +63,56 @@ def test_bulk_updates_are_written_as_one_transaction(tmp_path, monkeypatch):
     assert changed == 2
     assert saved["one"]["status"] == "manual_review"
     assert saved["two"]["status"] == "blocked"
+
+
+def _jobs_in(tmp_path, monkeypatch, jobs):
+    jobs_file = tmp_path / "jobs.json"
+    jobs_file.write_text(json.dumps(jobs))
+    monkeypatch.setattr(shared_config, "JOBS_FILE", jobs_file)
+    monkeypatch.setattr(shared_config, "JOBS_LOCK", tmp_path / "jobs.json.lock")
+    return jobs_file
+
+
+def test_marking_many_jobs_applied_is_one_write_and_stamps_the_date(tmp_path, monkeypatch):
+    urls = [f"https://example.com/job/{i}" for i in range(130)]
+    jobs_file = _jobs_in(tmp_path, monkeypatch, {
+        url: {"status": "pending", "error": "old failure", "applied_at": None} for url in urls
+    })
+
+    result = shared_config.mark_jobs_status(urls, "applied", now="2026-09-20T12:00:00+00:00")
+
+    saved = json.loads(jobs_file.read_text())
+    assert result == {"updated": 130, "missing": []}
+    assert {job["status"] for job in saved.values()} == {"applied"}
+    assert {job["applied_at"] for job in saved.values()} == {"2026-09-20T12:00:00+00:00"}
+    assert {job["error"] for job in saved.values()} == {None}
+
+
+def test_an_earlier_applied_date_is_kept_and_unknown_urls_are_reported(tmp_path, monkeypatch):
+    jobs_file = _jobs_in(tmp_path, monkeypatch, {
+        "https://example.com/a": {"status": "applied", "applied_at": "2026-09-01T00:00:00+00:00"},
+        "https://example.com/b": {"status": "failed", "applied_at": None},
+    })
+
+    result = shared_config.mark_jobs_status(
+        ["https://example.com/a", "https://example.com/b", "https://example.com/gone"], "applied",
+        now="2026-09-20T12:00:00+00:00",
+    )
+
+    saved = json.loads(jobs_file.read_text())
+    assert result == {"updated": 2, "missing": ["https://example.com/gone"]}
+    assert saved["https://example.com/a"]["applied_at"] == "2026-09-01T00:00:00+00:00"
+    assert saved["https://example.com/b"]["applied_at"] == "2026-09-20T12:00:00+00:00"
+
+
+def test_only_known_statuses_can_be_set_in_bulk(tmp_path, monkeypatch):
+    jobs_file = _jobs_in(tmp_path, monkeypatch, {"https://example.com/a": {"status": "pending"}})
+
+    try:
+        shared_config.mark_jobs_status(["https://example.com/a"], "in_progress")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("in_progress is a worker-owned state and must be refused")
+
+    assert json.loads(jobs_file.read_text())["https://example.com/a"]["status"] == "pending"
