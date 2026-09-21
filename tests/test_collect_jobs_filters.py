@@ -434,9 +434,16 @@ class CoopOnlyModeTests(unittest.TestCase):
         self.assertEqual(_ensure_internship_search_title("Data Engineer"), "Data Engineer Co-op")
         self.assertEqual(_ensure_internship_search_title("Software Engineer Co-op"), "Software Engineer Co-op")
 
-    def test_the_search_asks_linkedin_for_the_past_week_whatever_the_collect_tab_says(self):
+    def test_the_search_defaults_to_the_past_week_when_the_collect_tab_sends_no_date(self):
         self.assertEqual(self.query("Software Engineer Co-op")["f_TPR"], "r604800")
-        self.assertEqual(self.query("Software Engineer Co-op", {"date_posted": "r2592000"})["f_TPR"], "r604800")
+
+    def test_the_collect_tabs_posted_within_choice_is_kept(self):
+        for value in ("r86400", "r604800", "r2592000"):
+            with self.subTest(value=value):
+                self.assertEqual(self.query("Software Engineer Co-op", {"date_posted": value})["f_TPR"], value)
+
+    def test_any_time_sends_no_date_limit(self):
+        self.assertNotIn("f_TPR", self.query("Software Engineer Co-op", {"date_posted": ""}))
 
     def test_the_internship_only_filters_are_not_forced_so_co_ops_filed_elsewhere_are_kept(self):
         params = self.query("Software Engineer Co-op")
@@ -468,3 +475,75 @@ class InternshipModeIsUnchangedTests(unittest.TestCase):
             self.assertEqual(_ensure_internship_search_title("Data Engineer"), "Data Engineer Intern")
             self.assertTrue(_is_relevant_tech_internship_title("Software Engineer Intern"))
             self.assertTrue(_is_relevant_tech_internship_title("Software Engineering Co-op"))
+
+
+class VisaScreeningOffTests(unittest.TestCase):
+    """settings.json "collect_visa_screening": false: Collect Jobs is just the LinkedIn scraper."""
+
+    def setUp(self):
+        patcher = patch("cli.collect_jobs._visa_screening_enabled", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_job_that_would_fail_the_f1_check_is_still_saved_as_pending(self):
+        fields = _screening_fields(
+            {
+                "title": "Software Engineer Intern",
+                "location": "Austin, TX",
+                "description": "Candidates must be a U.S. citizen. No visa sponsorship." * 5,
+            },
+            PROFILE_NEEDS_SPONSORSHIP,
+            description_complete=True,
+        )
+
+        self.assertEqual((fields["status"], fields["screening_status"]), ("pending", "skipped"))
+        self.assertIsNone(fields["error"])
+
+    def test_no_description_and_an_unknown_location_do_not_send_it_to_manual_review(self):
+        fields = _screening_fields(
+            {"title": "Software Engineer Co-op", "location": "", "description": ""},
+            PROFILE_NEEDS_SPONSORSHIP,
+            description_complete=False,
+        )
+
+        self.assertEqual((fields["status"], fields["screening_status"]), ("pending", "skipped"))
+
+    def test_a_clearly_foreign_location_is_still_blocked(self):
+        fields = _screening_fields(
+            {"title": "Software Engineer Co-op", "location": "Toronto, Canada", "description": ""},
+            PROFILE_NEEDS_SPONSORSHIP,
+            description_complete=False,
+        )
+
+        self.assertEqual(fields["status"], "blocked")
+
+    def test_the_apply_queue_does_not_quarantine_jobs_collected_without_the_check(self):
+        jobs = {
+            "https://example.com/skipped": {
+                "status": "pending", "collection_method": "deterministic_linkedin_dom",
+                "screening_status": "skipped", "title": "Software Engineer Co-op", "location": "Austin, TX", "description": "",
+            },
+        }
+        with patch("cli.collect_jobs.update_jobs_bulk", return_value=0) as bulk:
+            changed = quarantine_legacy_unscreened_jobs(jobs, PROFILE_NEEDS_SPONSORSHIP)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(jobs["https://example.com/skipped"]["status"], "pending")
+        bulk.assert_called_once_with({})
+
+
+class VisaScreeningSettingTests(unittest.TestCase):
+    def test_screening_stays_on_unless_the_setting_turns_it_off(self):
+        from cli.collect_jobs import _visa_screening_enabled
+
+        for settings, expected in (({}, True), ({"collect_visa_screening": True}, True),
+                                   ({"collect_visa_screening": False}, False),
+                                   ({"collect_visa_screening": "off"}, False), ({"collect_visa_screening": "no"}, False)):
+            with self.subTest(settings), patch("cli.collect_jobs.load_settings", return_value=settings):
+                self.assertEqual(_visa_screening_enabled(), expected)
+
+    def test_a_settings_read_failure_keeps_the_screening_on(self):
+        from cli.collect_jobs import _visa_screening_enabled
+
+        with patch("cli.collect_jobs.load_settings", side_effect=OSError("unreadable")):
+            self.assertTrue(_visa_screening_enabled())

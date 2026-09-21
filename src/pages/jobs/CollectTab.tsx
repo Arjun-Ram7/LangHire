@@ -387,7 +387,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
                 </label>
                 {filter.type === "select" ? (
                   <select
-                    value={collectFilters[filter.key] || filter.default || ""}
+                    value={collectFilters[filter.key] ?? filter.default ?? ""}
                     onChange={(e) =>
                       setCollectFilters((prev) => ({
                         ...prev,

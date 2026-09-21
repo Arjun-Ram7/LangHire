@@ -859,9 +859,13 @@ async def start_collection(body: CollectRequest):
         titles = requested_titles or profile.get("target_job_titles", [])
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
         collected_urls_this_run: set[str] = set()
+        screening_on = collect_jobs._visa_screening_enabled()
+        # With the F-1/H-1B screening off Collect Jobs is only the scrape: earlier runs' unfinished
+        # screenings are not resumed and no second pass reopens every job page.
         resumable_urls = {
             url for url, job in jobs.items()
-            if job.get("screening_status") in {"pending", "fetch_failed"}
+            if screening_on
+            and job.get("screening_status") in {"pending", "fetch_failed"}
             and job.get("status") == "manual_review"
         }
         title_errors: list[str] = []
@@ -922,7 +926,7 @@ async def start_collection(body: CollectRequest):
                         print(f"  ❌ Error collecting {t}: {e}")
                         break
 
-            if source != "speedyapply" and not _collection_status.get("cancel_requested") and (collected_urls_this_run or resumable_urls):
+            if screening_on and source != "speedyapply" and not _collection_status.get("cancel_requested") and (collected_urls_this_run or resumable_urls):
                 jobs = read_jobs()
                 urls_to_screen = collected_urls_this_run | resumable_urls
                 subset = {u: jobs[u] for u in urls_to_screen if u in jobs}
@@ -940,10 +944,16 @@ async def start_collection(body: CollectRequest):
         compatible = sum(1 for job in run_jobs if job.get("screening_status") == "compatible")
         review = sum(1 for job in run_jobs if job.get("status") == "manual_review")
         blocked = sum(1 for job in run_jobs if job.get("status") == "blocked")
-        print(
-            f"\nCollection complete! New jobs this run: {len(run_jobs)} "
-            f"(F-1/H-1B compatible: {compatible}, Manual Review: {review}, Blocked: {blocked})"
-        )
+        if screening_on:
+            print(
+                f"\nCollection complete! New jobs this run: {len(run_jobs)} "
+                f"(F-1/H-1B compatible: {compatible}, Manual Review: {review}, Blocked: {blocked})"
+            )
+        else:
+            print(
+                f"\nCollection complete! New jobs this run: {len(run_jobs)} "
+                f"(F-1/H-1B screening off; Blocked: {blocked})"
+            )
 
     def make_coro():
         return _do_collect()

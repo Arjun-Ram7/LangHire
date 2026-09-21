@@ -195,13 +195,27 @@ _INTERN_WORD_RE = re.compile(r"\bintern(?:ship|ships|s)?\b", re.IGNORECASE)
 def _coop_only() -> bool:
     """Temporary collection mode: settings.json ``"collect_role_kind": "coop"``.
 
-    Collects co-op roles only, from the last week. Remove the key (or set it to "intern") and
+    Collects co-op roles only. Remove the key (or set it to "intern") and
     the collector is internship-only again; nothing else has to be reverted.
     """
     try:
         return str(load_settings().get("collect_role_kind") or "").strip().lower() == "coop"
     except Exception:
         return False
+
+
+def _visa_screening_enabled() -> bool:
+    """Whether Collect Jobs runs the F-1/H-1B screening (on unless settings.json turns it off).
+
+    ``"collect_visa_screening": false`` makes collection the plain LinkedIn scrape: no visa or
+    citizenship filtering, no Manual Review for unverified descriptions, no second pass over every
+    job page. Remove the key (or set it true) to restore the screening.
+    """
+    try:
+        value = load_settings().get("collect_visa_screening", True)
+    except Exception:
+        return True
+    return str(value).strip().lower() not in {"false", "off", "no", "0"}
 
 
 def _role_title_re() -> re.Pattern:
@@ -283,11 +297,9 @@ def _build_search_url(title: str, profile: dict, filters: dict | None = None) ->
         "job_type": "f_JT",
     }
     effective_filters = {"date_posted": "r604800", **(filters or {})}
-    if _coop_only():
-        # Past week whatever the Collect tab says. Not forced to LinkedIn's Internship type or
-        # level: co-ops are filed under other types too, and the title check keeps only co-ops.
-        effective_filters["date_posted"] = "r604800"
-    elif _is_internship_search(title):
+    # Co-op mode is not forced to LinkedIn's Internship type or level: co-ops are filed under other
+    # types too, and the title check keeps only co-ops. The date is the Collect tab's choice.
+    if not _coop_only() and _is_internship_search(title):
         effective_filters["experience_level"] = "1"
         effective_filters["job_type"] = "I"
     params = {"keywords": title, "location": location}
@@ -765,6 +777,17 @@ def _screening_fields(job: dict, profile: dict, *, description_complete: bool) -
     """Build auditable queue fields from location and visa screening."""
     checked_at = datetime.now(timezone.utc).isoformat()
     location_state = _classify_us_location(job.get("location", ""), profile)
+    if not _visa_screening_enabled():
+        skipped = {
+            "location_screening_status": location_state,
+            "visa_screening_status": "skipped",
+            "screening_checked_at": checked_at,
+        }
+        if location_state == "non_us":
+            # A clearly foreign posting is not what a U.S. search is after, screening or not.
+            return {**skipped, "status": "blocked", "screening_status": "ineligible",
+                    "error": f"Filtered out: non-US location ({job.get('location', '')})"}
+        return {**skipped, "status": "pending", "screening_status": "skipped", "error": None}
     text = " ".join(str(job.get(key) or "") for key in ("title", "company", "location", "description"))
     auth_state, reason, evidence = _authorization_assessment(text, profile)
 
@@ -797,7 +820,7 @@ def quarantine_legacy_unscreened_jobs(jobs: dict, profile: dict) -> int:
         if (
             job.get("collection_method") in collector_methods
             and job.get("status") in {"pending", "failed"}
-            and job.get("screening_status") != "compatible"
+            and job.get("screening_status") not in {"compatible", "skipped"}
         ):
             fields = _screening_fields(
                 job,
@@ -1329,7 +1352,9 @@ async def collect_descriptions(jobs: dict, profile: dict, cancel_flag: dict | No
                             await asyncio.sleep(1)
                         if _cancel_requested(cancel_flag):
                             break
-            if final_error:
+            if final_error and not _visa_screening_enabled():
+                print(f"    ⚠️  Could not read the description ({final_error[:120]}); the job stays as scraped")
+            elif final_error:
                 update_job(
                     url,
                     status="manual_review",
