@@ -40,7 +40,7 @@ import {
   getTailoredResumeContent,
 } from "../../lib/api";
 import { markStart, measureAndTrack } from "../../lib/perf";
-import { urlsBetween } from "../../lib/selection";
+import { urlsBetween, urlsInRows } from "../../lib/selection";
 import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
 import { useTranslation } from "react-i18next";
@@ -120,6 +120,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   // Multi-select state
   const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set());
   const [markingApplied, setMarkingApplied] = useState(false);
+  const [rangeFrom, setRangeFrom] = useState("1");
+  const [rangeTo, setRangeTo] = useState("");
   // Where a shift-click range starts: the checkbox clicked last.
   const lastClickedRef = useRef<string | null>(null);
 
@@ -351,6 +353,20 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     } else {
       setSelectedJobs(new Set(selectableJobs.map((j) => j.url)));
     }
+  };
+
+  // Row numbers count the selectable jobs from the top, in the order they are listed.
+  const rowNumbers = new Map(selectableJobs.map((j, i) => [j.url, i + 1]));
+
+  // Select rows "from" to "to" top to bottom, replacing the current selection.
+  const handleSelectRows = () => {
+    const urls = urlsInRows(
+      selectableJobs.map((j) => j.url),
+      Number(rangeFrom),
+      Number(rangeTo)
+    );
+    setSelectedJobs(new Set(urls));
+    lastClickedRef.current = urls.length ? urls[urls.length - 1] : null;
   };
 
   // A plain click toggles one job; shift-click selects every job from the last one clicked to
@@ -666,6 +682,40 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           ) : (
             <span />
           )}
+          {selectableJobs.length > 0 && (
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <span>Select rows</span>
+              <input
+                type="number"
+                min={1}
+                max={selectableJobs.length}
+                value={rangeFrom}
+                onChange={(e) => setRangeFrom(e.target.value)}
+                aria-label="First row"
+                className="w-16 px-2 py-1 rounded-md border border-border bg-white text-foreground text-sm"
+              />
+              <span>to</span>
+              <input
+                type="number"
+                min={1}
+                max={selectableJobs.length}
+                value={rangeTo}
+                placeholder={String(selectableJobs.length)}
+                onChange={(e) => setRangeTo(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSelectRows()}
+                aria-label="Last row"
+                className="w-16 px-2 py-1 rounded-md border border-border bg-white text-foreground text-sm"
+              />
+              <button
+                onClick={handleSelectRows}
+                disabled={!rangeFrom || !rangeTo}
+                className="btn-secondary !py-1"
+                title="Select these rows, top to bottom, replacing the current selection"
+              >
+                Select
+              </button>
+            </div>
+          )}
           <button
             onClick={handleDownloadJobList}
             disabled={exportingJobs}
@@ -723,6 +773,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                   <div className="flex items-start justify-between">
                     <div className="flex items-start gap-3 flex-1 min-w-0">
                       {/* Checkbox for selectable jobs */}
+                      {isSelectable && (
+                        <span className="mt-0.5 w-8 flex-shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                          {rowNumbers.get(job.url)}
+                        </span>
+                      )}
                       {isSelectable && (
                         <input
                           type="checkbox"
@@ -1001,7 +1056,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           <button
             onClick={handleBatchMarkApplied}
             disabled={markingApplied}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold bg-success text-white hover:bg-success/90 disabled:opacity-40 transition-all"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-semibold bg-success text-white hover:bg-success/90 disabled:opacity-40 transition-all"
           >
             {markingApplied ? (
               <Loader2 className="w-4 h-4 animate-spin" />
