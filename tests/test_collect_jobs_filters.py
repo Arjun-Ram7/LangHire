@@ -413,3 +413,58 @@ class ScreeningFieldsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoopOnlyModeTests(unittest.TestCase):
+    """Temporary collection mode: settings.json "collect_role_kind": "coop" (LinkedIn, last week)."""
+
+    def setUp(self):
+        patcher = patch("cli.collect_jobs._coop_only", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def query(self, title, filters=None):
+        from urllib.parse import parse_qs, urlsplit
+        url = _build_search_url(title, {"target_locations": ["United States"]}, filters)
+        return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+
+    def test_search_titles_become_co_op_searches(self):
+        self.assertEqual(_ensure_internship_search_title("Software Engineer Intern"), "Software Engineer Co-op")
+        self.assertEqual(_ensure_internship_search_title("Backend Internship"), "Backend Co-op")
+        self.assertEqual(_ensure_internship_search_title("Data Engineer"), "Data Engineer Co-op")
+        self.assertEqual(_ensure_internship_search_title("Software Engineer Co-op"), "Software Engineer Co-op")
+
+    def test_the_search_asks_linkedin_for_the_past_week_whatever_the_collect_tab_says(self):
+        self.assertEqual(self.query("Software Engineer Co-op")["f_TPR"], "r604800")
+        self.assertEqual(self.query("Software Engineer Co-op", {"date_posted": "r2592000"})["f_TPR"], "r604800")
+
+    def test_the_internship_only_filters_are_not_forced_so_co_ops_filed_elsewhere_are_kept(self):
+        params = self.query("Software Engineer Co-op")
+
+        self.assertNotIn("f_JT", params)
+        self.assertNotIn("f_E", params)
+        self.assertEqual(params["keywords"], "Software Engineer Co-op")
+
+    def test_only_co_op_titles_are_kept_and_plain_internships_are_dropped(self):
+        self.assertTrue(_is_relevant_tech_internship_title("Software Engineering Co-op - Fall 2027"))
+        self.assertTrue(_is_relevant_tech_internship_title("Backend Developer Coop"))
+        self.assertFalse(_is_relevant_tech_internship_title("Software Engineer Intern"))
+        self.assertFalse(_is_relevant_tech_internship_title("Software Engineering Internship"))
+        self.assertFalse(_is_relevant_tech_internship_title("Marketing Co-op"))  # not a tech role
+
+    def test_a_requested_co_op_search_matches_co_op_results_only(self):
+        self.assertTrue(_matches_requested_internship_role("Software Engineer Co-op", "Software Developer Co-op"))
+        self.assertFalse(_matches_requested_internship_role("Software Engineer Co-op", "Software Developer Intern"))
+
+
+class InternshipModeIsUnchangedTests(unittest.TestCase):
+    def test_default_mode_still_forces_the_internship_filters_and_accepts_both_words(self):
+        with patch("cli.collect_jobs._coop_only", return_value=False):
+            from urllib.parse import parse_qs, urlsplit
+            params = {k: v[0] for k, v in parse_qs(urlsplit(
+                _build_search_url("Software Engineer Intern", {"target_locations": ["United States"]})).query).items()}
+
+            self.assertEqual((params["f_JT"], params["f_E"], params["f_TPR"]), ("I", "1", "r604800"))
+            self.assertEqual(_ensure_internship_search_title("Data Engineer"), "Data Engineer Intern")
+            self.assertTrue(_is_relevant_tech_internship_title("Software Engineer Intern"))
+            self.assertTrue(_is_relevant_tech_internship_title("Software Engineering Co-op"))

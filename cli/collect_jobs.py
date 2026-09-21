@@ -33,6 +33,7 @@ try:
         clear_stale_browser_session_state, update_jobs_bulk,
     )
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    from core.config import load_settings
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -42,6 +43,7 @@ except ImportError:
         clear_stale_browser_session_state, update_jobs_bulk,
     )
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    from backend.core.config import load_settings
 
 
 def load_jobs() -> dict:
@@ -186,21 +188,44 @@ _AI_ML_INTERNSHIP_ROLE_RE = re.compile(
 )
 
 
+_COOP_TITLE_RE = re.compile(r"\bco[\s-]?ops?\b", re.IGNORECASE)
+_INTERN_WORD_RE = re.compile(r"\bintern(?:ship|ships|s)?\b", re.IGNORECASE)
+
+
+def _coop_only() -> bool:
+    """Temporary collection mode: settings.json ``"collect_role_kind": "coop"``.
+
+    Collects co-op roles only, from the last week. Remove the key (or set it to "intern") and
+    the collector is internship-only again; nothing else has to be reverted.
+    """
+    try:
+        return str(load_settings().get("collect_role_kind") or "").strip().lower() == "coop"
+    except Exception:
+        return False
+
+
+def _role_title_re() -> re.Pattern:
+    return _COOP_TITLE_RE if _coop_only() else _INTERNSHIP_TITLE_RE
+
+
 def _is_internship_search(title: str) -> bool:
-    """Return whether the requested search explicitly targets internships."""
-    return bool(_INTERNSHIP_TITLE_RE.search(title or ""))
+    """Return whether the requested search explicitly targets internships (co-ops in co-op mode)."""
+    return bool(_role_title_re().search(title or ""))
 
 
 def _ensure_internship_search_title(title: str) -> str:
-    """LangHire's collector is internship-only, including typed ad-hoc searches."""
+    """LangHire's collector is internship-only (co-op-only in co-op mode), including typed searches."""
     cleaned = " ".join((title or "").split())
+    if _coop_only():
+        cleaned = " ".join(_INTERN_WORD_RE.sub("Co-op", cleaned).split())
+        return cleaned if _COOP_TITLE_RE.search(cleaned) else f"{cleaned} Co-op".strip()
     return cleaned if _is_internship_search(cleaned) else f"{cleaned} Intern".strip()
 
 
 def _is_relevant_tech_internship_title(title: str) -> bool:
-    """Keep actual internships in the software and AI/ML role families."""
+    """Keep actual internships (co-ops in co-op mode) in the software and AI/ML role families."""
     text = title or ""
-    return bool(_INTERNSHIP_TITLE_RE.search(text) and _TECH_INTERNSHIP_ROLE_RE.search(text))
+    return bool(_role_title_re().search(text) and _TECH_INTERNSHIP_ROLE_RE.search(text))
 
 
 def _matches_requested_internship_role(search_title: str, job_title: str) -> bool:
@@ -258,7 +283,11 @@ def _build_search_url(title: str, profile: dict, filters: dict | None = None) ->
         "job_type": "f_JT",
     }
     effective_filters = {"date_posted": "r604800", **(filters or {})}
-    if _is_internship_search(title):
+    if _coop_only():
+        # Past week whatever the Collect tab says. Not forced to LinkedIn's Internship type or
+        # level: co-ops are filed under other types too, and the title check keeps only co-ops.
+        effective_filters["date_posted"] = "r604800"
+    elif _is_internship_search(title):
         effective_filters["experience_level"] = "1"
         effective_filters["job_type"] = "I"
     params = {"keywords": title, "location": location}
