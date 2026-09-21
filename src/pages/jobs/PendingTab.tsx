@@ -41,6 +41,7 @@ import {
 } from "../../lib/api";
 import { markStart, measureAndTrack } from "../../lib/perf";
 import { urlsBetween, urlsInRows } from "../../lib/selection";
+import { formatJobList } from "../../lib/jobList";
 import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
 import { useTranslation } from "react-i18next";
@@ -442,19 +443,18 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     }
   };
 
-  const handleDownloadJobList = async () => {
-    if (jobs.length === 0) return;
+  // Save a job list as a text file. With no argument it is every listed job; the selection bar
+  // passes just the selected ones, with their links.
+  const saveJobList = async (
+    list: Job[],
+    { heading, filePrefix, withLinks }: { heading: string; filePrefix: string; withLinks: boolean }
+  ) => {
+    if (list.length === 0) return;
     setExportingJobs(true);
     setJobListSaved(false);
     try {
-      const clean = (value: string | undefined, fallback: string) =>
-        (value || fallback).replace(/\s+/g, " ").trim();
-      const lines = jobs.map(
-        (job, index) =>
-          `${index + 1}. ${clean(job.company, "Unknown company")} — ${clean(job.title, "Untitled role")}`
-      );
-      const contents = [`LangHire Jobs (${jobs.length})`, "", ...lines, ""].join("\n");
-      const filename = `langhire-jobs-${new Date().toISOString().slice(0, 10)}.txt`;
+      const contents = formatJobList(heading, list, withLinks);
+      const filename = `${filePrefix}-${new Date().toISOString().slice(0, 10)}.txt`;
       const path = await save({
         defaultPath: filename,
         filters: [{ name: "Text file", extensions: ["txt"] }],
@@ -469,6 +469,16 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       setExportingJobs(false);
     }
   };
+
+  const handleDownloadJobList = () =>
+    saveJobList(jobs, { heading: "LangHire Jobs", filePrefix: "langhire-jobs", withLinks: false });
+
+  // The selected jobs, in the order they are listed
+  const handleDownloadSelected = () =>
+    saveJobList(
+      jobs.filter((j) => selectedJobs.has(j.url)),
+      { heading: "LangHire Selected Jobs", filePrefix: "langhire-selected-jobs", withLinks: true }
+    );
 
   // Batch tailor resumes
   const [tailoring, setTailoring] = useState(false);
@@ -1053,6 +1063,21 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           <span className="text-sm font-medium text-foreground">
             {selectedJobs.size} selected
           </span>
+          <button
+            onClick={handleDownloadSelected}
+            disabled={exportingJobs}
+            title="Save the selected jobs (company, role and link) as a text file"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-semibold border border-border bg-white text-foreground hover:bg-secondary disabled:opacity-40 transition-all"
+          >
+            {exportingJobs ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : jobListSaved ? (
+              <CheckCircle className="w-4 h-4" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {jobListSaved ? "Saved" : `Download ${selectedJobs.size}`}
+          </button>
           <button
             onClick={handleBatchMarkApplied}
             disabled={markingApplied}
