@@ -20,22 +20,22 @@ from backend.core.workday_experience import (
     with_locations,
 )
 
-RESUME = """ARJUN RAMACHANDRAN
-Blacksburg, VA  ·  +1-540-914-3128
+RESUME = """JORDAN ELLIS
+Fairview, OH  ·  +1-555-201-4477
 EDUCATION
 Virginia Tech — Bachelor of Science in Computer Science, Minor in Artificial Intelligence
 Expected May 2028
 GPA: 3.71/4.00
 EXPERIENCE
-AI/ML Intern — Marsh McLennan (Mercer Marsh Benefits)
+AI/ML Intern — Meridian Group (Meridian Benefits Consulting)
 Jun 2026 – Aug 2026
 • Trained separate XGBoost regression models in Azure ML to forecast renewal insurance revenue across 16
 sales representative portfolios.
 • Automated an end-to-end reporting pipeline in under a minute.
-Undergraduate Researcher, NSF BEELINE Project — Virginia Tech  ·  Advisor: Dr. T. M. Murali
+Undergraduate Researcher, NSF Trailhead Project — Virginia Tech  ·  Advisor: Dr. R. K. Alvarez
 Jan 2026 – Present
 • Engineered a Python web crawler and NLP pipeline.
-Software Engineering Intern — BITS Pilani, Dubai Campus
+Software Engineering Intern — Redwood Institute, Dubai Campus
 Feb 2023 – Mar 2023
 • Designed SQL schemas and queries.
 PROJECTS
@@ -49,13 +49,13 @@ def test_parses_every_experience_entry_and_stops_at_next_section():
     entries = parse_experience_text(RESUME)
 
     assert [e["company"] for e in entries] == [
-        "Marsh McLennan (Mercer Marsh Benefits)",
+        "Meridian Group (Meridian Benefits Consulting)",
         "Virginia Tech",
-        "BITS Pilani, Dubai Campus",
+        "Redwood Institute, Dubai Campus",
     ]
     assert [e["title"] for e in entries] == [
         "AI/ML Intern",
-        "Undergraduate Researcher, NSF BEELINE Project",
+        "Undergraduate Researcher, NSF Trailhead Project",
         "Software Engineering Intern",
     ]
 
@@ -129,9 +129,9 @@ def test_workday_degree_list_picks_bachelor_of_science_not_a_lookalike_row():
 
 
 PROFILE = {
-    "address": {"city": "Blacksburg", "state": "Virginia"},
+    "address": {"city": "Fairview", "state": "Ohio"},
     "education": {"school": "Virginia Tech"},
-    "work_locations": {"BITS Pilani": "Dubai, United Arab Emirates", "emax": "Dubai, UAE"},
+    "work_locations": {"Redwood Institute": "Dubai, United Arab Emirates", "solace retail": "Dubai, UAE"},
 }
 
 
@@ -140,7 +140,7 @@ def _job(company, title="Intern"):
 
 
 def test_location_comes_from_the_profile_map_by_company_name():
-    jobs = with_locations([_job("BITS Pilani, Dubai Campus"), _job("EMAX (Landmark Group)")], PROFILE)
+    jobs = with_locations([_job("Redwood Institute, Dubai Campus"), _job("Solace Retail (Northstar Group)")], PROFILE)
 
     assert [j["location"] for j in jobs] == ["Dubai, United Arab Emirates", "Dubai, UAE"]
 
@@ -148,11 +148,11 @@ def test_location_comes_from_the_profile_map_by_company_name():
 def test_a_role_at_the_candidates_own_university_is_located_in_their_home_city():
     jobs = with_locations([_job("Virginia Tech", "Undergraduate Researcher, ChainSentinel")], PROFILE)
 
-    assert jobs[0]["location"] == "Blacksburg, Virginia"
+    assert jobs[0]["location"] == "Fairview, Ohio"
 
 
 def test_unknown_employer_is_left_blank_rather_than_guessed():
-    jobs = with_locations([_job("Marsh McLennan (Mercer Marsh Benefits)")], PROFILE)
+    jobs = with_locations([_job("Meridian Group (Meridian Benefits Consulting)")], PROFILE)
 
     assert jobs[0]["location"] == ""
 
@@ -161,7 +161,7 @@ def _row(row_id, title="", company="", job=""):
     return {"id": row_id, "title": title, "company": company, "job": job}
 
 
-ENTRY = {"title": "AI/ML Intern", "company": "Marsh McLennan"}
+ENTRY = {"title": "AI/ML Intern", "company": "Meridian Group"}
 
 
 def test_a_row_we_already_filled_is_reused_even_if_its_text_was_changed():

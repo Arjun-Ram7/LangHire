@@ -105,8 +105,8 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         **WORKDAY_FACTS,
         "current_role": "Computer Science student at Virginia Tech",
         "current_employer": "Virginia Tech",
-        "current_location": "Blacksburg, Virginia",
-        "city": "Blacksburg",
+        "current_location": "Fairview, Ohio",
+        "city": "Fairview",
     }
 
     def test_work_experience_rows_are_left_to_the_row_filler(self):
@@ -114,12 +114,12 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         # own role/employer/city, so the row filler saw no matching job, added
         # another row, and the page never got past My Experience.
         _result, values = self.run_fixture(
-            self.WORK_ROW.format(title="AI/ML Intern", company="Marsh McLennan", location="Dubai, United Arab Emirates"),
+            self.WORK_ROW.format(title="AI/ML Intern", company="Meridian Group", location="Dubai, United Arab Emirates"),
             self.OWN_FACTS,
         )
 
         self.assertEqual(values["jt"], "AI/ML Intern")
-        self.assertEqual(values["co"], "Marsh McLennan")
+        self.assertEqual(values["co"], "Meridian Group")
         self.assertEqual(values["loc"], "Dubai, United Arab Emirates")
 
     def test_blank_work_experience_row_is_not_filled_with_the_candidates_own_job(self):
@@ -144,15 +144,15 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
     def test_self_identify_name_is_the_candidates_name_and_employee_id_stays_blank(self):
         # Live run: both boxes were filled with the disability answer "No" because
         # the form's own id ("selfIdentifiedDisabilityData--name") contains "disability".
-        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+        facts = {**self.OWN_FACTS, "full_name": "Jordan Ellis", "disability_status": "No"}
 
         _result, values = self.run_fixture(self.SELF_IDENTIFY, facts)
 
-        self.assertEqual(values["selfIdentifiedDisabilityData--name"], "Arjun Ramachandran")
+        self.assertEqual(values["selfIdentifiedDisabilityData--name"], "Jordan Ellis")
         self.assertEqual(values["selfIdentifiedDisabilityData--employeeId"], "")
 
     def test_self_identify_checks_the_no_disability_box(self):
-        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+        facts = {**self.OWN_FACTS, "full_name": "Jordan Ellis", "disability_status": "No"}
         page = self.browser.new_page()
         try:
             page.set_content(self.SELF_IDENTIFY)
@@ -186,7 +186,7 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
         # Live: the "No, I do not have a disability" click was reset by a re-render, but the
         # choice stayed locked, was never retried, and Save and Continue kept failing with
         # "Please check one of the boxes below".
-        facts = {**self.OWN_FACTS, "full_name": "Arjun Ramachandran", "disability_status": "No"}
+        facts = {**self.OWN_FACTS, "full_name": "Jordan Ellis", "disability_status": "No"}
         page = self.browser.new_page()
         try:
             page.set_content(self.SELF_IDENTIFY)
@@ -437,16 +437,16 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
 
     def test_signature_date_is_not_filled_with_a_location(self):
         # A MM/DD/YYYY signature date matched the location rule and received
-        # "Blacksburg, Virginia".
+        # "Fairview, Ohio".
         result, values = self.run_fixture(
             """
             <div class="q"><label for="sig">Signature date</label>
               <input id="sig" placeholder="MM/DD/YYYY" required></div>
             """,
-            {**WORKDAY_FACTS, "current_location": "Blacksburg, Virginia", "city": "Blacksburg"},
+            {**WORKDAY_FACTS, "current_location": "Fairview, Ohio", "city": "Fairview"},
         )
 
-        self.assertNotIn("Blacksburg", values["sig"], result["debugInputs"])
+        self.assertNotIn("Fairview", values["sig"], result["debugInputs"])
 
     def test_preferred_name_is_answered_with_the_first_name(self):
         result, values = self.run_fixture(
@@ -1307,9 +1307,9 @@ class StaticAutofillWorkdayTests(unittest.TestCase):
                 '<input id="loc" role="combobox" aria-haspopup="listbox">'
             )
             result = page.evaluate(
-                _autofill_script({**WORKDAY_FACTS, "current_location": "Blacksburg, Virginia"})
+                _autofill_script({**WORKDAY_FACTS, "current_location": "Fairview, Ohio"})
             )
-            self.assertEqual(page.locator("#loc").input_value(), "Blacksburg, Virginia", result)
+            self.assertEqual(page.locator("#loc").input_value(), "Fairview, Ohio", result)
             self.assertFalse(page.locator("#loc").evaluate("el => el.readOnly"))
         finally:
             page.close()
